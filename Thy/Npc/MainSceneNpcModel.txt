@@ -1,0 +1,1550 @@
+---@type NpcData
+local NpcData = util.relativeRequire("NpcData")
+---@type NpcEvent
+local NpcEvent = util.relativeRequire("NpcEvent")
+---@type MainSceneNpcType
+local NpcType = util.relativeRequire("NpcType")
+local log = GetLogger("MainSceneNpcModel")
+local ArrayUtil_GetRandomIndexList = ArrayUtil.GetRandomIndexList
+local table_insert = table.insert
+local table_remove = table.remove
+local math_random = math.random
+
+---场景npc数据管理类
+---@class MainSceneNpcModel
+---@field NpcType MainSceneNpcType npc类型
+local MainSceneNpcModel = Class(BaseSingleModel)
+
+---是否是我的村落场景
+---@type boolean
+local isMyScene
+---是否生成在道路上
+---@type boolean
+local isBornInBuildings = true
+---所有npc的数据
+---@type table<number, NpcData>
+local npcDataDic
+---区域索引
+---@type number
+local areaIndex = 0
+---显示的npc数量
+---@type number
+local shownVillagerAndHeroCount = 0
+---总人数上限
+---@type number
+local totalLimitCount
+---npc数量上限【建筑数量上限和总人数上限的较小值】
+---@type number
+local npcLimitCount
+---建筑上限系统
+---@type number
+local buildingLimitRate
+---建筑周围的生成点列表
+---@type TilePos[]
+local bornPosInBuildingsList
+---所有出生点的格子坐标
+---@type table<number, TilePos[]>
+local allBornTilePosDic
+---解锁了的区域出生点的格子坐标
+---@type table<number, TilePos[]>
+local bornTilePosDic
+---可以行走的区域
+---@type number[]
+local bornAreaList
+---npc配置相关
+---@type MainSceneNpcConfig
+local mainSceneNpcConfig
+---菜狗鸡精id
+---@type number
+local dogFoodNpcId = -1
+---醉酒大仙id
+---@type number
+local saveGodNpcId = -2
+---隐士初始id段
+local heroStartId = 1000000
+---政策npc初始id段
+local policyNpcStartId = 2000000
+---路径数据
+---@type NpcPath
+local pathCom
+---路径数据
+---@type table<number, MainSceneNpcPathPos[]>
+local pathDic
+---需要淡入效果的npc的字典
+---@type table<number, boolean>
+local fadeInNpcDic
+---npcView绑定时要检查是否需要触发事件
+---@type table<number, fun()[]>
+local bindNpcViewEventDic
+---缓存居民形象表
+---@type table<number, IConfVillagerShape>
+local villagerShapeConfigDic
+---小人气泡文本字典
+---@type table<number, string>
+local popupMsgDic = {}
+---npc状态字典
+---@type table<number, boolean>
+local npcShownStateDic = {}
+---是否刷新npc状态
+---@type boolean
+local needToRefreshShownState = true
+---场景是否激活
+---@type boolean
+local isMapActive = false
+---是否是全局截图模式下
+---@type boolean
+local isFullScreenShot = false
+---是否需要小人气泡
+---@type boolean
+local needShowPopup = true
+---npc坐标数据变化列表
+---@type MainSceneNpcPosChangeData[]
+local posChangeDataList = {}
+
+---定时清理数据
+---@type TaskInfo
+local taskInfo
+---更新任务
+---@type TaskInfo
+local updateTaskInfo
+
+---测试用
+---@type string
+local testPath
+
+---主场景小人事件发射器
+local EventEmitter = Event.New("MainSceneNpcModel")
+
+---主场景小人事件枚举
+---@class MainSceneNpcEventNameEnum
+MainSceneNpcModel.EventNameEnum = {
+    UpdateNpc = "CreateNpc",
+    DestroyNpc = "DestroyNpc",
+    ChangeNpcPos = "ChangeNpcPos",
+    InitMapGuideUI = "InitMapGuideUI",
+    DestroyMapGuideUI = "DestroyMapGuideUI"
+}
+
+---数据初始化
+---@param com NpcPath 路径数据
+---@param path string 测试用
+function MainSceneNpcModel:Init(com, path)
+    -- 没有场景发生切换就不需要重新生成
+    local isMySceneNow = ModelFactory.VillageScene:IsMine()
+    if isMyScene ~= nil and isMyScene == isMySceneNow then
+        return
+    end
+    isMyScene = isMySceneNow
+    testPath = path
+    self:InitData(com)
+    self:AddListener()
+    self:OpenUpdateTask()
+end
+
+---释放
+function MainSceneNpcModel:OnDestroy()
+    self:Shut()
+end
+
+---数据释放
+function MainSceneNpcModel:Shut()
+    self:RemoveListener()
+    self:CloseTask()
+    self:CloseUpdateTask()
+
+    self.clearDataDelay = nil
+    self.offsetPosY = nil
+    allBornTilePosDic = nil
+    bornTilePosDic = nil
+    bornAreaList = nil
+    mainSceneNpcConfig = nil
+    pathDic = nil
+    pathCom = nil
+    bornPosInBuildingsList = nil
+    fadeInNpcDic = nil
+    isMyScene = nil
+    bindNpcViewEventDic = nil
+    villagerShapeConfigDic = nil
+    npcShownStateDic = nil
+    popupMsgDic = nil
+    areaIndex = 0
+    shownVillagerAndHeroCount = 0
+
+    -- 释放
+    if npcDataDic then
+        for _, npcData in pairs(npcDataDic) do
+            npcData:Disposed()
+        end
+
+        npcDataDic = nil
+    end
+end
+
+---设置地图激活状态
+---@param active boolean 是否激活
+function MainSceneNpcModel:SetMapActive(active)
+    isMapActive = active
+end
+
+---获取地图激活状态
+---@return boolean
+function MainSceneNpcModel:GetMapActive()
+    return isMapActive
+end
+
+---定时清理数据
+function MainSceneNpcModel:OpenTask()
+    self:CloseTask()
+
+    if not self.clearDataDelay then
+        local config = ConfigMap.param["mainVillagerRunTime"]
+        self.clearDataDelay = config and config.value or 480
+    end
+
+    taskInfo = TaskScheduler.Schedule(function()
+        self:Shut()
+        return false
+    end, self.clearDataDelay)
+end
+
+---关闭倒计时
+function MainSceneNpcModel:CloseTask()
+    if not taskInfo then
+        return
+    end
+
+    TaskScheduler.UnSchedule(taskInfo)
+    taskInfo = nil
+end
+
+---清除缓存的标识
+function MainSceneNpcModel:ClearFlag()
+    isMyScene = nil
+end
+
+---触发npc事件
+---@param npcId number
+---@param npcEvent NpcEvent
+---@param isCreateInRoad boolean 是否在道路上生成，默认为false
+function MainSceneNpcModel:TriggerEvent(npcId, npcEvent, isCreateInRoad)
+    -- 消失
+    if npcEvent == NpcEvent.Gone then
+        ---如果该npc消失，需要重新随机一个npc显示
+        self:RemoveNpc(npcId)
+        self:RandomCreateNpc(npcId, isCreateInRoad)
+        self:InitMapGuideUI(npcId)
+        return
+    end
+end
+
+---获取指定政策npc数据
+---@param npcId number
+---@return NpcData
+function MainSceneNpcModel:GetPolicyNpcDataById(ploicyId)
+    if not npcDataDic then
+        npcDataDic = {}
+    end
+
+    local npcId = ploicyId + policyNpcStartId
+    return npcDataDic[npcId]
+end
+
+---获取指定npc数据
+---@param npcId number
+---@return NpcData
+function MainSceneNpcModel:GetNpcDataById(npcId)
+    npcDataDic = npcDataDic or {}
+    return npcDataDic[npcId]
+end
+
+---判断是否需要做淡入效果
+---@param npcId number
+---@return boolean
+function MainSceneNpcModel:NeedFadeInById(npcId)
+    local needFadeIn = fadeInNpcDic[npcId]
+    fadeInNpcDic[npcId] = nil
+    return needFadeIn
+end
+
+---@class MainSceneNpcData
+---@field type MainSceneNpcType npc类型
+---@field id number npcId
+---@field policyId number 政策id
+
+---获取npc类型
+---@param npcId number
+---@return MainSceneNpcType
+function MainSceneNpcModel:GetNpcType(npcId)
+    -- 菜狗鸡精
+    if npcId == dogFoodNpcId then
+        return NpcType.DogFoodNpc
+    end
+
+    -- 醉酒大仙
+    if npcId == saveGodNpcId then
+        return NpcType.SaveGodNpc
+    end
+
+    -- 政策
+    if npcId > policyNpcStartId then
+        return NpcType.PolicyNpc
+    end
+
+    -- 隐士
+    if npcId > heroStartId then
+        return NpcType.Hero
+    end
+
+    -- 居民
+    return NpcType.Villager
+end
+
+---获取npc的类型和id
+---@param npcId number
+---@return MainSceneNpcData
+function MainSceneNpcModel:GetNpcTypeData(npcId)
+    ---@type MainSceneNpcData
+    local data = {}
+
+    -- 菜狗鸡精
+    if npcId == dogFoodNpcId then
+        data.type = NpcType.DogFoodNpc
+        data.id = dogFoodNpcId
+        return data
+    end
+
+    -- 醉酒大仙
+    if npcId == saveGodNpcId then
+        data.type = NpcType.SaveGodNpc
+        data.id = saveGodNpcId
+        return data
+    end
+
+    -- 政策
+    if npcId > policyNpcStartId then
+        data.type = NpcType.PolicyNpc
+        data.policyId = npcId - policyNpcStartId
+        return data
+    end
+
+    -- 隐士
+    if npcId > heroStartId then
+        data.type = NpcType.Hero
+        data.id = npcId - heroStartId
+        return data
+    end
+
+    -- 居民
+    data.type = NpcType.Villager
+    data.id = npcId
+    return data
+end
+
+---@class MainSceneNpcConfig
+---@field minStopSteps number 停止最小移动步数
+---@field maxStopSteps number 停止最大移动步数
+---@field minStopTime number 停止最短时间
+---@field maxStopTime number 停止最长时间
+---@field minMoveTime number 单格最小移动时间
+---@field maxMoveTime number 单格最大移动时间
+---@field minRoadMoveSteps number 道路最小移动步数
+---@field maxRoadMoveSteps number 道路最大移动步数
+---@field roadRate number 走路概率
+---@field pathRate number 沿路径走的概率
+---@field enterBuildingBaseRate number 进入建筑的基础概率
+---@field enterBuildingAddRate number 每次未进入建筑时增加的概率
+---@field enterBuildingLimitStep number 指定步数内不能进入建筑
+
+---获取npc配置
+---@return MainSceneNpcConfig
+function MainSceneNpcModel:GetMainSceneNpcConfig()
+    if mainSceneNpcConfig then
+        return mainSceneNpcConfig
+    end
+
+    local config = ConfigMap.param["mainSceneWalkingSet"].value
+    mainSceneNpcConfig = {}
+    mainSceneNpcConfig.minStopSteps = config[1]
+    mainSceneNpcConfig.maxStopSteps = config[2]
+    mainSceneNpcConfig.minStopTime = config[3]
+    mainSceneNpcConfig.maxStopTime = config[4]
+    mainSceneNpcConfig.minMoveTime = config[5]
+    mainSceneNpcConfig.maxMoveTime = config[6]
+    mainSceneNpcConfig.minRoadMoveSteps = config[7]
+    mainSceneNpcConfig.maxRoadMoveSteps = config[8]
+    mainSceneNpcConfig.roadRate = config[9]
+    mainSceneNpcConfig.pathRate = config[10]
+    mainSceneNpcConfig.enterBuildingBaseRate = config[11]
+    mainSceneNpcConfig.enterBuildingAddRate = config[12]
+    mainSceneNpcConfig.enterBuildingLimitStep = config[13]
+    return mainSceneNpcConfig
+end
+
+---@class MainSceneNpcPathData
+---@field offsetY number y坐标偏移值
+---@field moveTime number 移动所需时间
+---@field paths UnityEngine.Vector2[] 路径坐标数据
+
+---获取指定格子的路径数据
+---@param tilePos TilePos 格子坐标
+---@return MainSceneNpcPathData[]
+function MainSceneNpcModel:GetPathData(tilePos)
+    if not pathDic then
+        pathDic = {}
+    end
+
+    local key = ModelFactory.TileMap:GetKeyByTilePos(tilePos)
+    if pathDic[key] then
+        return pathDic[key]
+    end
+
+    -- 没有数据
+    if util.isNull(pathCom) then
+        return nil
+    end
+
+    ---@type MainSceneNpcPathData[]
+    local tempPaths = {}
+    ---@type System.Array
+    local paths = pathCom.paths
+    local len = paths.Length - 1
+
+    -- 遍历C# Array
+    for i = 0, len do
+        ---@type NpcPathData
+        local path = paths[i]
+        if path.key == key then
+            ---@type MainSceneNpcPathData
+            local npcPathData = {}
+            ---@type UnityEngine.Vector2[]
+            local luaPosList = {}
+            local posList = path.path
+            local listLen = posList.Length - 1
+
+            -- 遍历C# Array
+            for j = 0, listLen do
+                ---@type UnityEngine.Vector3
+                local pos = posList[j]
+                ---@type UnityEngine.Vector2
+                local luaPos = { x = pos.x, y = pos.y }
+                table_insert(luaPosList, luaPos)
+            end
+
+            npcPathData.offsetY = path.offsetY
+            npcPathData.moveTime = path.moveTime
+            npcPathData.paths = luaPosList
+            table_insert(tempPaths, npcPathData)
+        end
+    end
+
+    pathDic[key] = tempPaths
+    return tempPaths
+end
+
+---获取y坐标偏移值
+---@param id number
+---@return number
+function MainSceneNpcModel:GetNpcOffsetPosY(id)
+    if not self.offsetPosY then
+        self.offsetPosY = ModelFactory.TileMap:GetCellSize().height / 2
+    end
+    return self.offsetPosY
+end
+
+---菜狗鸡精是否解锁
+---@return boolean
+function MainSceneNpcModel:IsDogFoodUnlock()
+    return ModelFactory.VillageScene:IsDogFoodUnlock()
+end
+
+---醉酒大仙是否解锁
+---@return boolean
+function MainSceneNpcModel:IsSaveGodUnlock()
+    -- 拜访村落不需要显示
+    if isMyScene == false then
+        return false
+    end
+    return ModelFactory.UnlockSystem:IsSystemUnlocked(SystemIdEnum.SYS_SAVEGOD)
+end
+
+---添加npcView绑定事件
+---@param npcId number
+---@param fun fun() 绑定时要触发的事件
+function MainSceneNpcModel:AddBindNpcViewEvent(npcId, fun)
+    if not bindNpcViewEventDic then
+        bindNpcViewEventDic = {}
+    end
+    if not bindNpcViewEventDic[npcId] then
+        bindNpcViewEventDic[npcId] = {}
+    end
+
+    table_insert(bindNpcViewEventDic[npcId], fun)
+end
+
+---检查npcView绑定时触发的事件
+---@param npcId number
+function MainSceneNpcModel:CheckBindNpcViewEvent(npcId)
+    if not bindNpcViewEventDic or not bindNpcViewEventDic[npcId] then
+        return
+    end
+
+    local funList = bindNpcViewEventDic[npcId]
+
+    for _, fun in pairs(funList) do
+        fun()
+    end
+
+    bindNpcViewEventDic[npcId] = nil
+end
+
+---获取居民形象配置
+---@param id number
+---@return IConfVillagerShape
+function MainSceneNpcModel:GetVillagerShapeConfig(id)
+    if not villagerShapeConfigDic then
+        villagerShapeConfigDic = {}
+        local configs = ConfigMap.villagerShape
+
+        for key, _ in pairs(configs.M) do
+            local config = configs[key]
+            villagerShapeConfigDic[config.id] = config
+        end
+    end
+    return villagerShapeConfigDic[id]
+end
+
+---获取npc说话信息
+---@param npcId number
+---@return string
+function MainSceneNpcModel:GetMsgForTalk(npcId, commonTextId, dogFoodTextId)
+    popupMsgDic = popupMsgDic or {}
+
+    local msg = popupMsgDic[npcId]
+    if msg then
+        return msg
+    end
+
+    local data = self:GetNpcTypeData(npcId)
+
+    -- 居民
+    if data.type == NpcType.Villager then
+        local commonTextConfig = ConfigMap.commonText[commonTextId]
+        msg = commonTextConfig and ConfigUtil.GetValueWithWeight(commonTextConfig.text) or "xxx"
+        popupMsgDic[npcId] = msg
+        return msg
+    end
+
+    -- 隐士
+    if data.type == NpcType.Hero then
+        local heroId = data.id
+        local heroConfig = ConfigMap.hero[heroId]
+        msg = heroConfig and heroConfig.talk or "xxx"
+        popupMsgDic[npcId] = msg
+        return msg
+    end
+
+    -- 政策npc
+    if data.type == NpcType.PolicyNpc then
+        local policyId = data.policyId
+        local policyConfig = ConfigMap.policy[policyId]
+        msg = policyConfig and policyConfig.npcTalk or "xxx"
+        popupMsgDic[npcId] = msg
+        return msg
+    end
+
+    -- 菜狗鸡精npc
+    if data.type == NpcType.DogFoodNpc then
+        local commonTextConfig = ConfigMap.commonText[dogFoodTextId]
+        msg = commonTextConfig and ConfigUtil.GetValueWithWeight(commonTextConfig.text) or "xxx"
+        popupMsgDic[npcId] = msg
+        return msg
+    end
+
+    popupMsgDic[npcId] = "xxx"
+    return "xxx"
+end
+
+---清除小人气泡数据
+---@param npcId number
+function MainSceneNpcModel:ClearMsgForTalk(npcId)
+    if not popupMsgDic then
+        return
+    end
+    popupMsgDic[npcId] = nil
+end
+
+---是否全图显示（不考虑视野管理 - 村落全屏截图用）
+---@param isShow boolean
+function MainSceneNpcModel:SetFullScreenShotFlag(isShow)
+    isFullScreenShot = isShow
+end
+
+---获取全图显示标识
+---@return boolean
+function MainSceneNpcModel:GetFullScreenShotFlag()
+    return isFullScreenShot
+end
+
+---控制小人说话气泡的显隐
+---@param isShow boolean 是否显示气泡
+function MainSceneNpcModel:SetNpcPopupState(isShow)
+    needShowPopup = isShow
+end
+
+---初始化数据
+---@param com NpcPath 路径数据
+---@private
+function MainSceneNpcModel:InitData(com)
+    self.NpcType = NpcType
+    totalLimitCount = ConfigMap.param["mainVillagerNumber"].value
+    buildingLimitRate = ConfigMap.param["mainVillagerLimit"].value
+    npcDataDic = {}
+    pathDic = {}
+    fadeInNpcDic = {}
+    bindNpcViewEventDic = {}
+    popupMsgDic = {}
+    npcShownStateDic = {}
+    pathCom = com
+    shownVillagerAndHeroCount = 0
+
+    self:UpdateCameraShownData()
+    self:SetNpcLimitCount()
+
+    -- 醉酒大仙
+    local isSaveGodUnlock = self:IsSaveGodUnlock()
+    if isSaveGodUnlock then
+        self:CreateNpc(saveGodNpcId, true)
+    end
+
+    -- 政策npc
+    local policys = self:GetPolicyList()
+    if #policys > 0 then
+        -- 政策小人不受上限影响
+        for _, policy in pairs(policys) do
+            -- 政策npc id段从policyNpcStartId开始
+            self:CreateNpc(policy.policyId + policyNpcStartId, true)
+        end
+    end
+
+    -- 在建筑周边生成
+    if isBornInBuildings == true then
+        isBornInBuildings = false
+        self:BornInBuildings()
+        return
+    end
+
+    -- 在道路上生成
+    self:BornInRoad()
+end
+
+---在建筑周边生成
+---@private
+function MainSceneNpcModel:BornInBuildings()
+    bornPosInBuildingsList = ModelFactory.TileMap:GetBornPosInBuildingsList()
+
+    -- 没有生成点
+    if #bornPosInBuildingsList <= 0 then
+        self:BornInRoad()
+        return
+    end
+
+    ---@type number[]
+    local npcIdsList = self:GetNpcIdsList()
+    local bornPosRandomList = ArrayUtil_GetRandomIndexList(#bornPosInBuildingsList, #npcIdsList)
+
+    for i = 1, #bornPosRandomList do
+        local npcId = npcIdsList[i]
+        local tilePos = bornPosInBuildingsList[bornPosRandomList[i]]
+        local npcData = NpcData.New(npcId, tilePos, self)
+        npcDataDic[npcId] = npcData
+    end
+
+    -- 测试用
+    self:CreateTestNpc()
+end
+
+---在道路上生成
+---@private
+function MainSceneNpcModel:BornInRoad()
+    self:RefreshBornPosInRoad()
+
+    -- 没有生成点
+    if not bornTilePosDic or not bornAreaList or #bornAreaList <= 0 then
+        return
+    end
+
+    ---@type number[]
+    local npcIdsList = self:GetNpcIdsList()
+    local totalNpcCount = #npcIdsList
+    -- 相对平均的分布在不同区域
+    local areaNpcCount = math.floor(totalNpcCount / #bornAreaList)
+    local tempCount = areaNpcCount * #bornAreaList
+    local deltaCount = tempCount < totalNpcCount and (totalNpcCount - tempCount) or 0
+
+    -- 区域对应人数
+    ---@type table<number, number>
+    local areaNpcCountDic = {}
+
+    for areaId, _ in pairs(bornTilePosDic) do
+        -- 没法平均分的都生成在第一个区域内
+        if areaId == 1 then
+            areaNpcCountDic[areaId] = areaNpcCount + deltaCount
+        else
+            areaNpcCountDic[areaId] = areaNpcCount
+        end
+    end
+
+    for areaId, npcCount in pairs(areaNpcCountDic) do
+        for i = 1, npcCount do
+            local npcId = npcIdsList[1]
+            local tilePosList = bornTilePosDic[areaId]
+            if tilePosList and #tilePosList > 0 then
+                local index = math_random(#tilePosList)
+                local npcData = NpcData.New(npcId, tilePosList[index], self)
+                npcDataDic[npcId] = npcData
+                table_remove(npcIdsList, 1)
+            end
+        end
+    end
+
+    -- 测试用
+    self:CreateTestNpc()
+end
+
+---获取需要生成的npcId列表
+---@return number[], table<number, VillagerCharData>
+---@private
+function MainSceneNpcModel:GetNpcIdsList()
+    ---@type number[]
+    local npcIdsList = {}
+
+    -- 隐士
+    local heroes = self:GetHeroUnlockList()
+    local heroNpcCount = #heroes
+    -- 居民
+    local villagers = self:GetVillagerList()
+    local villagerNpcCount = #villagers
+    -- 菜狗鸡精npc
+    local isDogFoodUnlock = self:IsDogFoodUnlock()
+    local dogFoodNpcCount = isDogFoodUnlock == true and 1 or 0
+
+    -- npc总数量
+    local totalNpcCount = heroNpcCount + villagerNpcCount + dogFoodNpcCount
+    if totalNpcCount <= 0 then
+        return npcIdsList
+    end
+
+    -- 数量的限制只影响居民和隐士，不影响政策小人
+    local villagerAndHeroCount = villagerNpcCount + heroNpcCount
+    shownVillagerAndHeroCount = villagerAndHeroCount >= npcLimitCount and npcLimitCount or villagerAndHeroCount
+
+    -- 菜狗小人不受上限影响
+    if isDogFoodUnlock then
+        table_insert(npcIdsList, dogFoodNpcId)
+    end
+
+    -- 居民和隐士人数在限制内，全都生成
+    if villagerAndHeroCount <= npcLimitCount then
+        -- 居民id段从0开始
+        for key, villager in pairs(villagers) do
+            local id = villager.data and villager.data.id or villager.id
+            table_insert(npcIdsList, id)
+        end
+
+        -- 隐士id段从heroStartId开始
+        for key, hero in pairs(heroes) do
+            local id = hero.data and hero.data.id or hero.id
+            table_insert(npcIdsList, id + heroStartId)
+        end
+    else
+        -- 居民和隐士总数量多于限制的情况下
+        -- 居民和隐士按一定比例生成
+        local villagerRate = ConfigMap.param["mainVillagerProportion"].value
+        -- 预期居民数量
+        local needVillagerCount = math.floor(npcLimitCount * villagerRate / 10000)
+        -- 预期隐士数量
+        local needHeroCount = npcLimitCount - needVillagerCount
+        -- 与实际值判断
+        -- 居民和隐士的总数多于限制，则不需要考虑都够或者都不够的情况，只需要考虑一方不够要另一方补足数量的情况
+        if villagerNpcCount >= needVillagerCount and heroNpcCount < needHeroCount then
+            local notEnoughCount = needHeroCount - heroNpcCount
+            needVillagerCount = needVillagerCount + notEnoughCount
+            needHeroCount = heroNpcCount
+        elseif heroNpcCount >= needHeroCount and villagerNpcCount < needVillagerCount then
+            local notEnoughCount = needVillagerCount - villagerNpcCount
+            needHeroCount = needHeroCount + notEnoughCount
+            needVillagerCount = villagerNpcCount
+        end
+
+        -- 居民
+        local randomVillagerIdList = ArrayUtil_GetRandomIndexList(villagerNpcCount, needVillagerCount)
+
+        for i = 1, #randomVillagerIdList do
+            local villager = villagers[randomVillagerIdList[i]]
+            local id = villager.data and villager.data.id or villager.id
+            table_insert(npcIdsList, id)
+        end
+
+        -- 隐士
+        local randomHeroIdList = ArrayUtil_GetRandomIndexList(heroNpcCount, needHeroCount)
+
+        for i = 1, #randomHeroIdList do
+            local hero = heroes[randomHeroIdList[i]]
+            local id = hero.data and hero.data.id or hero.id
+            table_insert(npcIdsList, id + heroStartId)
+        end
+    end
+    return npcIdsList
+end
+
+---创建测试用npc
+---@private
+function MainSceneNpcModel:CreateTestNpc()
+    if testPath == "" then
+        return
+    end
+
+    local posList = string.split(testPath, "|")
+
+    for key, posStr in pairs(posList) do
+        local pos = string.split(posStr, ",")
+        ---@type TilePos
+        local tilePos = { x = tonumber(pos[1]), y = tonumber(pos[2]) }
+        local npcId = 100 + key
+        local npcData = NpcData.New(npcId, tilePos, self, true)
+        npcDataDic[npcId] = npcData
+    end
+end
+
+---刷新道路生成点
+---@private
+function MainSceneNpcModel:RefreshBornPosInRoad()
+    if not allBornTilePosDic then
+        allBornTilePosDic = ModelFactory.TileMap:GetAllBornTilePos()
+    end
+    if #allBornTilePosDic <= 0 then
+        return
+    end
+
+    local areaList = ModelFactory.VillageScene:GetVillageArea()
+    bornTilePosDic = {}
+    bornAreaList = {}
+
+    for key, areaData in pairs(areaList) do
+        if areaData.status == VillageAreaStatus.ReclamationEnd then
+            table_insert(bornAreaList, areaData.cId)
+        end
+    end
+
+    for key, areaId in pairs(bornAreaList) do
+        local tilePosList = allBornTilePosDic[areaId]
+        if tilePosList and #tilePosList > 0 then
+            bornTilePosDic[areaId] = {}
+
+            for key, tilePos in pairs(tilePosList) do
+                if ModelFactory.TileMap:CanMoveInRoadByTilePos(tilePos) then
+                    table_insert(bornTilePosDic[areaId], tilePos)
+                end
+            end
+        end
+    end
+end
+
+---随机创建新的npc
+---@param fillterNpcId number 如果有多余的npc可生成，则过滤掉指定npc。该参数默认nil，表示随机生成
+---@param isCreateInRoad boolean 是否在道路上生成，默认为false
+---@private
+function MainSceneNpcModel:RandomCreateNpc(fillterNpcId, isCreateInRoad)
+    -- 指定npc
+    if fillterNpcId then
+        local npcType = self:GetNpcTypeData(fillterNpcId)
+        -- 如果不是居民或者隐士，直接生成
+        if npcType ~= NpcType.Villager or npcType ~= NpcType.Hero then
+            self:CreateNpc(fillterNpcId, isCreateInRoad)
+            return
+        end
+    end
+
+    -- 判断数量是否达到上限
+    if shownVillagerAndHeroCount >= npcLimitCount then
+        return
+    end
+
+    local villagers = self:GetVillagerList()
+    local heroes = self:GetHeroUnlockList()
+
+    -- 需要过滤时要判断有没有足够的npc数量
+    local needFillter = false
+    if fillterNpcId then
+        local totalNpcCount = #villagers + #heroes
+        -- 只有npc数量足够才能过滤
+        needFillter = totalNpcCount > shownVillagerAndHeroCount + 1
+    end
+
+    for key, villager in pairs(villagers) do
+        local id = villager.data and villager.data.id or villager.id
+        if needFillter and fillterNpcId and (fillterNpcId == id) then
+            goto continue
+        end
+
+        local isSuc = self:CreateNpc(id, isCreateInRoad)
+        if isSuc then
+            return
+        end
+        ::continue::
+    end
+
+    for key, hero in pairs(heroes) do
+        local id = hero.data and hero.data.id or hero.id
+        local npcId = id + heroStartId
+        if needFillter and fillterNpcId and (fillterNpcId == npcId) then
+            goto continue
+        end
+
+        local isSuc = self:CreateNpc(npcId, isCreateInRoad)
+        if isSuc then
+            return
+        end
+        ::continue::
+    end
+end
+
+---添加新的NPC
+---@param npcId number
+---@param isCreateInRoad boolean 是否在道路上生成，默认为false
+---@return boolean 是否成功添加隐士或者居民
+---@private
+function MainSceneNpcModel:CreateNpc(npcId, isCreateInRoad)
+    npcDataDic = npcDataDic or {}
+
+    -- 已有npc，不重新生成
+    if npcDataDic[npcId] then
+        return
+    end
+
+    -- 默认不在道路上生成
+    if isCreateInRoad == nil then
+        isCreateInRoad = false
+    end
+
+    ---@return boolean 是否成功
+    local BornInRoad = function()
+        -- 尝试在道路上生成
+        self:RefreshBornPosInRoad()
+        -- 没有生成点
+        if not bornTilePosDic or not bornAreaList or #bornAreaList <= 0 then
+            log:Error("创建npc异常，未找到可生成的格子坐标")
+            return false
+        end
+
+        bornPosInBuildingsList = {}
+
+        for key, tilePosList in pairs(bornTilePosDic) do
+            for key, tilePos in pairs(tilePosList) do
+                table_insert(bornPosInBuildingsList, tilePos)
+            end
+        end
+        return true
+    end
+
+    -- 在道路上生成
+    if isCreateInRoad then
+        local isSuc = BornInRoad()
+        if isSuc == false then
+            return
+        end
+    else
+        -- 优先判断建筑周围，如果没有，则在道路生成
+        bornPosInBuildingsList = ModelFactory.TileMap:GetBornPosInBuildingsList()
+        -- 没有区域可生成
+        if #bornPosInBuildingsList <= 0 then
+            local isSuc = BornInRoad()
+            if isSuc == false then
+                return
+            end
+        end
+    end
+
+    local npcTypeData = self:GetNpcTypeData(npcId)
+
+    -- 居民和隐士要参与数量上限判断
+    if npcTypeData.type == NpcType.Hero or npcTypeData.type == NpcType.Villager then
+        if shownVillagerAndHeroCount >= npcLimitCount then
+            return
+        end
+
+        local randomIndex = math_random(#bornPosInBuildingsList)
+        local tilePos = bornPosInBuildingsList[randomIndex]
+        local npcData = NpcData.New(npcId, tilePos, self)
+        npcDataDic[npcId] = npcData
+        shownVillagerAndHeroCount = shownVillagerAndHeroCount + 1
+        self:SetFadeInNpcData(npcId, tilePos)
+        return true
+    end
+
+    -- 特殊npc直接生成
+    local randomIndex = math_random(#bornPosInBuildingsList)
+    local tilePos = bornPosInBuildingsList[randomIndex]
+    local npcData = NpcData.New(npcId, tilePos, self)
+    npcDataDic[npcId] = npcData
+    self:SetFadeInNpcData(npcId, tilePos)
+end
+
+---移除NPC
+---@param npcId number
+---@private
+function MainSceneNpcModel:RemoveNpc(npcId)
+    npcDataDic = npcDataDic or {}
+    fadeInNpcDic = fadeInNpcDic or {}
+
+    local npcData = npcDataDic[npcId]
+    if not npcData then
+        return
+    end
+
+    self:RemoveNpcShownStateData(npcId)
+    npcData:DestroyNpcView()
+    npcData:DestroyMapGuideUIView()
+    npcData:Disposed()
+    npcData = nil
+    npcDataDic[npcId] = nil
+    fadeInNpcDic[npcId] = nil
+
+    local npcTypeData = self:GetNpcTypeData(npcId)
+
+    -- 居民和隐士要扣除数量
+    if npcTypeData.type == NpcType.Hero or npcTypeData.type == NpcType.Villager then
+        shownVillagerAndHeroCount = shownVillagerAndHeroCount - 1
+    end
+end
+
+---醉酒大仙状态变化
+---@param status number 状态
+---@private
+function MainSceneNpcModel:ChangeSaveGodStatus(status)
+    if not npcDataDic then
+        npcDataDic = {}
+    end
+
+    local npcData = npcDataDic[saveGodNpcId]
+    if not npcData then
+        return
+    end
+
+    npcData:ChangeStatus(status)
+end
+
+---设置建筑限制的小人数量
+---@private
+function MainSceneNpcModel:SetNpcLimitCount()
+    local buildings = ModelFactory.VillageScene:GetNpcBuildingsInVillage()
+    local buildingLimitCount = #buildings * buildingLimitRate
+    npcLimitCount = buildingLimitCount >= totalLimitCount and totalLimitCount or buildingLimitCount
+end
+
+---如果在屏幕内的需要做淡入效果
+---@param npcId number
+---@param tilePos TilePos 出生点
+---@private
+function MainSceneNpcModel:SetFadeInNpcData(npcId, tilePos)
+    if not isMapActive then
+        return
+    end
+
+    if not self.minX then
+        self:UpdateCameraShownData()
+    end
+
+    if not self.minX then
+        return
+    end
+
+    local curPos = ModelFactory.TileMap:TilePos2TileWorldPos(tilePos)
+    -- 判断是否需要显示
+    local insideInScreen = true
+    -- 当前x坐标小于minX
+    if curPos.x < self.minX then
+        insideInScreen = false
+        -- 当前x坐标大于maxX
+    elseif curPos.x > self.maxX then
+        insideInScreen = false
+        -- 当前y坐标小于minY
+    elseif curPos.y < self.minY then
+        insideInScreen = false
+        -- 当前y坐标大于maxY
+    elseif curPos.y > self.maxY then
+        insideInScreen = false
+    end
+
+    fadeInNpcDic[npcId] = insideInScreen
+end
+
+---初始化地图指引器
+---@param npcId number
+---@private
+function MainSceneNpcModel:InitMapGuideUI(npcId)
+    self:FireEvent(self.EventNameEnum.InitMapGuideUI, npcId)
+end
+
+---添加监听
+---@private
+function MainSceneNpcModel:AddListener()
+    self:RemoveListener()
+
+    -- 不是我的村落不需要监听数据变化
+    if isMyScene == false then
+        self.updateAoiCallbackForVS = VisitSceneMgr:OnEvent(VisitSceneMgr.EventNameEnum.UpdateAoi, function()
+            self:UpdateCameraShownData()
+        end)
+        return
+    end
+
+    -- 居民变化
+    self.villagerChangeCallback = ModelFactory.Villager:AddChangeListener(function(addList, updateList, removeList)
+        -- 新增
+        if #addList > 0 then
+            for key, model in pairs(addList) do
+                -- 留村的成年人
+                if model:IsAdult() == true and model:IsAlive() == true and model:IsLeave() == false then
+                    self:CreateNpc(model.data.id)
+                end
+            end
+        end
+
+        -- 更新
+        if #updateList > 0 then
+            for key, model in pairs(updateList) do
+                -- 留村的成年人
+                if model:IsAdult() == true and model:IsAlive() == true and model:IsLeave() == false then
+                    self:CreateNpc(model.data.id)
+                end
+            end
+        end
+
+        -- 移除
+        if #removeList > 0 then
+            for key, model in pairs(removeList) do
+                -- 留村的成年人
+                if model:IsAdult() == true and model:IsAlive() == true and model:IsLeave() == false then
+                    self:RemoveNpc(model.data.id)
+                end
+            end
+        end
+    end)
+
+    -- 隐士变化
+    self.heroChangeCallback = ModelFactory.Hero:AddChangeListener(function(addList, updateList, removeList)
+        -- 新增
+        if #addList > 0 then
+            for key, model in pairs(addList) do
+                self:CreateNpc(model.data.id + heroStartId)
+            end
+        end
+
+        -- 移除
+        if #removeList > 0 then
+            for key, model in pairs(removeList) do
+                self:RemoveNpc(model.data.id + heroStartId)
+            end
+        end
+    end)
+
+    -- 政策变化
+    self.policyChangeCallBack = ModelFactory.Policy:AddChangeListener(function(addList, updateList, removeList)
+        -- 新增
+        if #addList > 0 then
+            for key, model in pairs(addList) do
+                ---id = 政策ID + 政策npc初始id段
+                local id = model.data.policyId + policyNpcStartId
+                local isStatus = model.data.status == 3
+                if isStatus == true then
+                    self:RemoveNpc(id)
+                else
+                    self:CreateNpc(id, true)
+                end
+            end
+        end
+
+        -- 更新
+        if #updateList > 0 then
+            for key, model in pairs(updateList) do
+                ---id = 政策ID + 政策npc初始id段
+                local id = model.data.policyId + policyNpcStartId
+                local isStatus = model.data.status == 3
+                if isStatus == true then
+                    self:RemoveNpc(id)
+                else
+                    self:CreateNpc(id, true)
+                end
+            end
+        end
+
+        -- 移除
+        if #removeList > 0 then
+            for key, model in pairs(removeList) do
+                ---id = 政策ID + 政策npc初始id段
+                local id = model.data.policyId + policyNpcStartId
+                self:RemoveNpc(id)
+            end
+        end
+    end)
+
+    -- 区域变化
+    self.areaChangeCallback = Local.Village.areas:OnChange(function()
+        self:RefreshBornPosInRoad()
+    end)
+
+    -- 建筑变化
+    self.buildingChangeCallback = ModelFactory.Building:AddChangeListener(function(addList)
+        -- 目前不考虑收进仓库的建筑，因为能被收进去的建筑默认不影响小人数量
+        if #addList <= 0 then
+            return
+        end
+
+        -- 数量上限判断
+        self:SetNpcLimitCount()
+        if shownVillagerAndHeroCount >= npcLimitCount then
+            return
+        end
+
+        local deltaCount = npcLimitCount - shownVillagerAndHeroCount
+        local curCount = 0
+        local villagers = ModelFactory.Villager:GetAdultsInVillage()
+        local heroes = ModelFactory.Hero:GetUnlockList()
+
+        for key, model in pairs(villagers) do
+            local isSuc = self:CreateNpc(model.data.id)
+            if isSuc then
+                curCount = curCount + 1
+                if curCount >= deltaCount then
+                    return
+                end
+            end
+        end
+
+        for key, model in pairs(heroes) do
+            local isSuc = self:CreateNpc(model.data.id + heroStartId)
+            if isSuc then
+                curCount = curCount + 1
+                if curCount >= deltaCount then
+                    return
+                end
+            end
+        end
+    end)
+
+    -- 系统解锁
+    self.systemUnlockCallback = ModelFactory.UnlockSystem:OnSystemUnlocked(function(systemID)
+        -- 菜狗鸡精
+        if systemID == SystemIdEnum.SYS_VEGETABLE_DOG_ESSENCE then
+            self:CreateNpc(dogFoodNpcId)
+            return
+        end
+
+        -- 拯救大仙
+        if systemID == SystemIdEnum.SYS_SAVEGOD then
+            self:CreateNpc(saveGodNpcId, true)
+            return
+        end
+    end)
+
+    -- 醉酒大仙状态变化
+    self.saveGodStatusChangeCallback = ModelFactory.SaveGod:OnStatusChangeEvent(function(status)
+        self:ChangeSaveGodStatus(status)
+    end)
+
+    self.updateAoiCallback = MainSceneMgr:OnEvent(MainSceneMgr.EventNameEnum.UpdateAoi, function()
+        self:UpdateCameraShownData()
+    end)
+
+    -- 主界面自定义物体位置变化
+    self.customGoPosChangeCallback = MainSceneMgr:OnEvent(MainSceneMgr.EventNameEnum.TilePosChange,
+        function(tilePos, isUsed)
+            if isUsed == false then
+                return
+            end
+
+            local npcData = self:GetNpcDataById(saveGodNpcId)
+            -- 没有桃花大仙
+            if not npcData then
+                return
+            end
+
+            -- 不在同一个位置
+            if npcData.curTile.x ~= tilePos.x or npcData.curTile.y ~= tilePos.y then
+                return
+            end
+
+            -- 停止状态的桃花大仙要判断是否和自定义物体重合
+            local status = ModelFactory.SaveGod:GetCurrentState()
+            local isStop = status == SaveGodState.Fight or status == SaveGodState.Success
+            if isStop == false then
+                return
+            end
+
+            self:TriggerEvent(saveGodNpcId, NpcEvent.Gone, true)
+        end)
+end
+
+---移除监听
+---@private
+function MainSceneNpcModel:RemoveListener()
+    if self.villagerChangeCallback then
+        self.villagerChangeCallback()
+        self.villagerChangeCallback = nil
+    end
+    if self.heroChangeCallback then
+        self.heroChangeCallback()
+        self.heroChangeCallback = nil
+    end
+    if self.policyChangeCallBack then
+        self.policyChangeCallBack()
+        self.policyChangeCallBack = nil
+    end
+    if self.areaChangeCallback then
+        self.areaChangeCallback()
+        self.areaChangeCallback = nil
+    end
+    if self.buildingChangeCallback then
+        self.buildingChangeCallback()
+        self.buildingChangeCallback = nil
+    end
+    if self.systemUnlockCallback then
+        self.systemUnlockCallback()
+        self.systemUnlockCallback = nil
+    end
+    if self.saveGodStatusChangeCallback then
+        self.saveGodStatusChangeCallback()
+        self.saveGodStatusChangeCallback = nil
+    end
+    if self.customGoPosChangeCallback then
+        self.customGoPosChangeCallback()
+        self.customGoPosChangeCallback = nil
+    end
+    if self.updateAoiCallback then
+        self.updateAoiCallback()
+        self.updateAoiCallback = nil
+    end
+    if self.updateAoiCallbackForVS then
+        self.updateAoiCallbackForVS()
+        self.updateAoiCallbackForVS = nil
+    end
+end
+
+---获取已解锁的隐士
+---@return PbHero[]|HeroModel[]
+---@private
+function MainSceneNpcModel:GetHeroUnlockList()
+    -- 自己村落
+    if isMyScene == true then
+        local modelList = ModelFactory.Hero:GetUnlockList()
+        return modelList
+    end
+
+    -- 拜访村落
+    local dataList = ModelFactory.VillageScene:GetRoleData().Hero.heroes
+    local list = {}
+
+    for key, data in pairs(dataList) do
+        if data.lv ~= nil then
+            table_insert(list, data)
+        end
+    end
+    return list
+end
+
+---获取留村的居民
+---@return PbVillager[]|VillagerModel[]
+---@private
+function MainSceneNpcModel:GetVillagerList()
+    -- 自己村落
+    if isMyScene == true then
+        local modelList = ModelFactory.Villager:GetAdultsInVillage()
+        return modelList
+    end
+
+    -- 拜访村落
+    local roleData = ModelFactory.VillageScene:GetRoleData()
+    local dataList = roleData.Village.villagers
+    local lifeId = roleData.life.id
+    local list = {}
+
+    for key, data in pairs(dataList) do
+        -- 活着的 成年人 留村 不是正在入世的
+        if data.dead ~= 1 and data.workType ~= 1 and data.workType ~= 2 and data.id ~= lifeId then
+            table_insert(list, data)
+        end
+    end
+    return list
+end
+
+---获取政策npc
+---@return PbPolicy[]
+---@private
+function MainSceneNpcModel:GetPolicyList()
+    -- 自己村落
+    if isMyScene == true then
+        return ModelFactory.Policy:GetPolicyData()
+    end
+
+    -- 拜访村落
+    local dataList = ModelFactory.VillageScene:GetRoleData().Policy
+    local list = {}
+
+    for key, data in pairs(dataList) do
+        if data.status ~= 3 then
+            table_insert(list, data)
+        end
+    end
+    return list
+end
+
+---更新相机视野数据
+---@private
+function MainSceneNpcModel:UpdateCameraShownData()
+    self.minX = nil
+    self.maxX = nil
+    self.minY = nil
+    self.maxY = nil
+
+    local cameraPosLimitList = nil
+
+    if MainSceneMgr:IsMapActive() then
+        cameraPosLimitList = MainSceneMgr:GetCameraFieldOfView()
+    elseif VisitSceneMgr:IsMapActive() then
+        cameraPosLimitList = VisitSceneMgr:GetCameraShownView()
+    end
+
+    if not cameraPosLimitList then
+        return
+    end
+
+    self.minX = cameraPosLimitList[1] - 5.12
+    self.maxX = cameraPosLimitList[2] + 5.12
+    self.minY = cameraPosLimitList[3] - 5.12
+    self.maxY = cameraPosLimitList[4] + 5.12
+end
+
+---获取相机视野数据
+---@return number, number, number, number
+function MainSceneNpcModel:GetCameraShownData()
+    if not self.minX then
+        self:UpdateCameraShownData()
+    end
+    return self.minX, self.maxX, self.minY, self.maxY
+end
+
+---添加npc状态数据
+---@param npcId number
+---@param insideInScreen boolean 是否在屏幕内
+function MainSceneNpcModel:AddNpcShownStateData(npcId, insideInScreen)
+    needToRefreshShownState = true
+    npcShownStateDic[npcId] = insideInScreen
+end
+
+---移除npc状态数据
+---@param npcId number
+---@private
+function MainSceneNpcModel:RemoveNpcShownStateData(npcId)
+    needToRefreshShownState = true
+    npcShownStateDic[npcId] = false
+end
+
+---@class MainSceneNpcPosChangeData
+---@field npcType number
+---@field pos UnityEngine.Vector2
+
+---添加npc坐标变化数据
+---@param posChangeData MainSceneNpcPosChangeData 坐标变化数据
+function MainSceneNpcModel:AddNpcPosChangeData(posChangeData)
+    if not isMapActive then
+        return
+    end
+    table_insert(posChangeDataList, posChangeData)
+end
+
+---发送npc坐标变化事件
+---@private
+function MainSceneNpcModel:FireNpcPosChangeEvent()
+    if not posChangeDataList or #posChangeDataList <= 0 then
+        return
+    end
+
+    self:FireEvent(self.EventNameEnum.ChangeNpcPos, posChangeDataList)
+    posChangeDataList = {}
+end
+
+---开启更新任务
+---@private
+function MainSceneNpcModel:OpenUpdateTask()
+    -- 不重复开启更新任务
+    if updateTaskInfo then
+        return
+    end
+
+    updateTaskInfo = TaskScheduler.Schedule(function()
+        -- 1：先更新npc移动数据
+        for _, npcData in pairs(npcDataDic) do
+            if not npcData then
+                goto continue
+            end
+
+            -- 全屏截图模式下小人不走动
+            if isFullScreenShot then
+                npcData:ForceStop()
+            else
+                npcData:UpdateData(needShowPopup)
+            end
+
+            ::continue::
+        end
+
+        -- 2：根据npc显示状态决定要不要通知视图层刷新
+        if needToRefreshShownState then
+            needToRefreshShownState = false
+
+            if isMapActive then
+                self:FireEvent(self.EventNameEnum.UpdateNpc, npcShownStateDic)
+            end
+        end
+
+        -- 3：发送npc坐标变化事件
+        if isMapActive then
+            self:FireNpcPosChangeEvent()
+        end
+
+        return true
+    end)
+end
+
+---关闭更新任务
+---@private
+function MainSceneNpcModel:CloseUpdateTask()
+    if not updateTaskInfo then
+        return
+    end
+
+    TaskScheduler.UnSchedule(updateTaskInfo)
+    updateTaskInfo = nil
+end
+
+--------------------------- 事件触发 ---------------------------
+
+---发射事件
+---@param eventName MainSceneNpcEventNameEnum
+function MainSceneNpcModel:FireEvent(eventName, ...)
+    EventEmitter:Broadcast(eventName, ...)
+end
+
+---监听主场景小人事件
+---@param eventName MainSceneNpcEventNameEnum
+---@param handler fun()
+---@return fun() @取消监听函数
+function MainSceneNpcModel:OnEvent(eventName, handler)
+    EventEmitter:AddListener(eventName, handler, nil, 0)
+    return function()
+        EventEmitter:RemoveListener(eventName, handler)
+    end
+end
+
+return MainSceneNpcModel

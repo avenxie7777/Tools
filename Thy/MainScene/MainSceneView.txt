@@ -1,0 +1,251 @@
+local log = GetLogger("MainSceneView")
+local string_format = string.format
+local inputInst = CS.UnityEngine.Input
+local mouseKey = CS.UnityEngine.KeyCode.Mouse0
+local NumberUtil_NumberFormat = NumberUtil.NumberFormat
+local GameObjectUtil_Active = GameObjectUtil.Active
+
+---@class MainSceneView
+---@field controller MainSceneWidget
+local MainSceneView = {}
+MainSceneView.args = {
+	---@type UnityEngine.GameObject
+	go_MainRoot = nil,
+	---@type XLua.LuaTarget
+	lt_RightMenu = nil,
+	---@type XLua.LuaTarget
+	lt_TriggerGift = nil,
+	---@type XLua.LuaTarget
+	lt_MainTaskItem = nil,
+	---@type UnityEngine.GameObject
+	go_tileMapMsgRoot = nil,
+	---@type UnityEngine.UI.Text
+	txt_TilePos = nil,
+	---@type UnityEngine.UI.Text
+	txt_TileWorldPos = nil,
+	---@type UnityEngine.UI.Text
+	txt_TileKey = nil,
+	---@type UnityEngine.UI.Text
+	txt_Area = nil,
+}
+local args = MainSceneView.args
+
+---右导航栏视图
+---@type MainSceneRightMenuView
+local RightMenuView
+---@type TaskInfo
+local updateTask
+
+---@private
+function MainSceneView:Start()
+    self:AddListener()
+end
+
+---初始化
+function MainSceneView:OnEnable2()
+    self:InitRightMenu()
+    self:InitMainTaskItem()
+    self:InitTriggerGift()
+    self:UpdataTriggerGift()
+    self:ShowTileMap()
+end
+
+---@private
+function MainSceneView:OnDisable()
+    if RightMenuView then
+        RightMenuView:Disposed()
+    end
+
+    self:CloseUpdateTask()
+    self:DisableMainTaskItem()
+end
+
+---@private
+function MainSceneView:OnDestroy()
+    self:RemoveListener()
+end
+
+---显示/隐藏UI
+---@param active boolean
+function MainSceneView:SetMainRootActive(active)
+    GameObjectUtil_Active(args.go_MainRoot, active)
+end
+
+---显示格子坐标
+function MainSceneView:ShowTileMap()
+    self:CloseUpdateTask()
+    local isShow = CS.SROptionsData.IsShowTileMapEnable()
+    GameObjectUtil_Active(args.go_tileMapMsgRoot, isShow)
+    if isShow == false then
+        return
+    end
+
+    args.txt_TilePos.text = "点击屏幕获取坐标"
+    args.txt_TileWorldPos.text = ""
+    args.txt_TileKey.text = ""
+    updateTask = TaskScheduler.Schedule(function()
+        if not args then
+            return false
+        end
+
+        -- 获取格子数据
+        if inputInst.GetKeyDown(mouseKey) then
+            local mousePos = inputInst.mousePosition
+            mousePos.z = -10
+
+            -- 场景相机获取
+            if not self.sceneCamera then
+                self.sceneCamera = MainSceneMgr:GetCameras()
+            end
+
+            local worldPos = self.sceneCamera:ScreenToWorldPoint(mousePos)
+            local tileWorldPos = ModelFactory.TileMap:WorldPos2TileWorldPos(worldPos)
+            local tilePos = ModelFactory.TileMap:TileWorldPos2TilePos(tileWorldPos)
+            args.txt_TileWorldPos.text = string_format("格子世界坐标：(%s,%s)",
+                NumberUtil_NumberFormat(tileWorldPos.x), NumberUtil_NumberFormat(tileWorldPos.y))
+            args.txt_TilePos.text = string_format("格子坐标：(%s,%s)", tilePos.x, tilePos.y)
+            local tileKey = ModelFactory.TileMap:GetKeyByTilePos(tilePos)
+            args.txt_TileKey.text = string_format("格子索引：%s", tileKey)
+        end
+        return true
+    end)
+end
+
+---初始InitMainTaskItem化主线任务
+function MainSceneView:InitMainTaskItem()
+    local chapterID = Local.User.chapterTasks.chapterId:Get()
+    local chapterCfg = ConfigMap.chapterMainTask[chapterID]
+    local isPopUp = chapterCfg.inIsPopup
+    args.lt_MainTaskItem.gameObject:SetActive(isPopUp > 0)
+    ---@type MainTaskItemView
+    local mainTaskView = args.lt_MainTaskItem.Table
+    if isPopUp > 0 then
+        mainTaskView:Refresh()
+    else
+        mainTaskView:Disposed()
+    end
+
+end
+
+---显示/隐藏UI
+function MainSceneView:DisableMainTaskItem()
+    ---@type MainTaskItemView
+    local mainTaskView = args.lt_MainTaskItem.Table
+    mainTaskView:Disposed()
+end
+
+---初始化触发礼包
+---@private
+function MainSceneView:InitTriggerGift()
+    ---@type MainSceneTriggerGiftItemView
+    local triggerGiftView = args.lt_TriggerGift.Table
+    triggerGiftView:PlayAnim()
+end
+
+---初始化右侧导航栏
+---@private
+function MainSceneView:InitRightMenu()
+    RightMenuView = args.lt_RightMenu.Table
+    RightMenuView:Init()
+end
+
+---关闭Update任务
+---@private
+function MainSceneView:CloseUpdateTask()
+    if not updateTask then
+        return
+    end
+
+    TaskScheduler.UnSchedule(updateTask)
+    updateTask = nil
+end
+
+---主线系统开关回调监听
+---@param isOn  boolean 是否打开
+---@private
+function MainSceneView.OnSwitchMainTask(isOn)
+    if isOn then
+        GameObjectUtil_Active(args.lt_MainTaskItem.gameObject, true)
+    else
+        SystemSwitchHint.SystemCloseHint(SystemIdEnum.SYS_MAIN_TASK)
+        GameObjectUtil_Active(args.lt_MainTaskItem.gameObject, false)
+    end
+end
+
+---触发礼包系统开关回调监听
+---@param isOn  boolean 是否打开
+---@private
+function MainSceneView.OnSwitchTriggerGift(isOn)
+    if isOn then
+        MainSceneView:UpdataTriggerGift()
+    else
+        SystemSwitchHint.SystemCloseHint(SystemIdEnum.SYS_LIMIT_GIFT_PACK)
+        GameObjectUtil_Active(args.lt_TriggerGift.gameObject, false)
+    end
+end
+
+---刷新触发礼包
+function MainSceneView:UpdataTriggerGift()
+    if ModelFactory.SystemSwitch:IsClosed(SystemIdEnum.SYS_LIMIT_GIFT_PACK) then
+        GameObjectUtil_Active(args.lt_TriggerGift.gameObject, false)
+        return
+    end
+    local GiftCfgWarp = ModelFactory.TriggerGift:GetGiftCfgWarps()[1]
+    local triggerGift, triggerGiftCfg = GiftCfgWarp and GiftCfgWarp.giftInfo or nil,
+        GiftCfgWarp and GiftCfgWarp.giftCfgItem or nil
+    ---没有礼包不展示
+    if not triggerGift or not triggerGiftCfg then
+        if not triggerGiftCfg then
+            log:Debug("MainSceneView:UpdataTriggerGift... triggerGiftCfg is nill , triggerGift = {0}", triggerGift)
+        end
+
+        GameObjectUtil_Active(args.lt_TriggerGift.gameObject, false)
+        return
+    end
+
+    GameObjectUtil_Active(args.lt_TriggerGift.gameObject, true)
+    ---@type MainSceneTriggerGiftItemView
+    local triggerGiftView = args.lt_TriggerGift.Table
+    triggerGiftView:RefrushUi(triggerGift, triggerGiftCfg, self)
+end
+
+---添加监听
+---@private
+function MainSceneView:AddListener()
+    self.OffTriggerChangeEvent = Game.TriggerGift:OnEvent(function()
+        self:UpdataTriggerGift()
+    end)
+    if ModelFactory.SystemSwitch:IsClosed(SystemIdEnum.SYS_MAIN_TASK) then
+        GameObjectUtil_Active(args.lt_MainTaskItem.gameObject, false)
+    end
+
+    ---触发礼包系统开关监听
+    ModelFactory.SystemSwitch:OnSwitch(SystemIdEnum.SYS_LIMIT_GIFT_PACK, MainSceneView.OnSwitchTriggerGift)
+    ModelFactory.SystemSwitch:OnSwitch(SystemIdEnum.SYS_MAIN_TASK, MainSceneView.OnSwitchMainTask)
+    self.offChapterTaskIDListener = Local.User.chapterTasks.chapterId:OnChange(function()
+        self:InitMainTaskItem()
+    end)
+end
+
+---移除监听
+---@private
+function MainSceneView:RemoveListener()
+    if self.OffTriggerChangeEvent then
+        self.OffTriggerChangeEvent()
+        self.OffTriggerChangeEvent = nil
+    end
+    if self.ShowTriggerPopUp then
+        self.ShowTriggerPopUp()
+        self.ShowTriggerPopUp = nil
+    end
+    if self.offChapterTaskIDListener then
+        self.offChapterTaskIDListener()
+        self.offChapterTaskIDListener = nil
+    end
+
+    ---取消触发礼包系统开关监听
+    ModelFactory.SystemSwitch:OffSwitch(SystemIdEnum.SYS_LIMIT_GIFT_PACK, MainSceneView.OnSwitchTriggerGift)
+    ModelFactory.SystemSwitch:OffSwitch(SystemIdEnum.SYS_MAIN_TASK, MainSceneView.OnSwitchMainTask)
+end
+
+return MainSceneView

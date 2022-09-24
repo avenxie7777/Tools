@@ -1,0 +1,881 @@
+--useLuaClass useArgsMeta
+local xLuaUtil = require("xlua.util")
+local GameObjectUtil_Active = GameObjectUtil.Active
+local SpineUtil_ClearAnimation = SpineUtil.ClearAnimation
+local util_isNull = util.isNull
+local table_concat = table.concat
+
+---@class NpcView
+local NpcView = Class()
+
+NpcView.args = {
+    ---@type UnityEngine.Transform
+    tr_Root = nil,
+    ---阴影
+    ---@type UnityEngine.SpriteRenderer
+    spr_shadow = nil,
+    ---淡入时间
+    ---@type System.Single
+    fadeInDuration = nil,
+    ---淡出时间
+    ---@type System.Single
+    fadeOutDuration = nil,
+    ---npc辅助类
+    ---@type Thy.Mono.NpcHelper
+    NpcHelper = nil,
+    ----------------------------------------- 居民 -----------------------------------------
+    ---身体spine
+    ---@type Spine.Unity.SkeletonAnimation
+    spineBody = nil,
+    ---头spine
+    ---@type Spine.Unity.SkeletonAnimation
+    spineHead = nil,
+    ---头发spine
+    ---@type Spine.Unity.SkeletonAnimation
+    spineHair = nil,
+    ---后面头发Spine
+    ---@type Spine.Unity.SkeletonAnimation
+    spineHairBack = nil,
+    ---头节点跟随组件
+    ---@type Spine.Unity.BoneFollower
+    headFollower = nil,
+    ---头发节点跟随组件
+    ---@type Spine.Unity.BoneFollower
+    hairFollower = nil,
+    ---后面的头发节点跟随组件
+    ---@type Spine.Unity.BoneFollower
+    hairBackFollower = nil,
+    ---身体mesh
+    ---@type UnityEngine.MeshRenderer
+    meshBody = nil,
+    ---头mesh
+    ---@type UnityEngine.MeshRenderer
+    meshHead = nil,
+    ---头发mesh
+    ---@type UnityEngine.MeshRenderer
+    meshHair = nil,
+    ---后面的头发mesh
+    ---@type UnityEngine.MeshRenderer
+    meshHairBack = nil,
+    ---@type UnityEngine.Transform
+    tf_hairBack = nil,
+    ---@type UnityEngine.Transform
+    tf_body = nil,
+    ---@type UnityEngine.Transform
+    tf_head = nil,
+    ---@type UnityEngine.Transform
+    tf_hair = nil,
+    ----------------------------------------- 隐士 -----------------------------------------
+    ---隐士spine
+    ---@type Spine.Unity.SkeletonAnimation
+    spineHero = nil,
+    ---隐士mesh
+    ---@type UnityEngine.MeshRenderer
+    meshHero = nil,
+    ---@type UnityEngine.Transform
+    tf_hero = nil,
+    ----------------------------------------- 政策npc -----------------------------------------
+    ---政策npc spine
+    ---@type Spine.Unity.SkeletonAnimation
+    spinePolicyNpc = nil,
+    ---政策npc mesh
+    ---@type UnityEngine.MeshRenderer
+    meshPolicyNpc = nil,
+    ---@type UnityEngine.Transform
+    tf_policyNpc = nil,
+    ---@type Thy.Mono.InputTargetMono
+    ipt_policy = nil,
+    ----------------------------------------- 菜狗鸡精npc -----------------------------------------
+    ---菜狗鸡精spine
+    ---@type Spine.Unity.SkeletonAnimation
+    spineDogFood = nil,
+    ---菜狗鸡精mesh
+    ---@type UnityEngine.MeshRenderer
+    meshDogFood = nil,
+    ---@type UnityEngine.Transform
+    tf_dogFood = nil,
+    ---@type Thy.Mono.InputTargetMono
+    ipt_dogFood = nil,
+    ----------------------------------------- 醉酒大仙npc -----------------------------------------
+    ---醉酒大仙spine
+    ---@type Spine.Unity.SkeletonAnimation
+    spineSaveGod = nil,
+    ---菜狗鸡精mesh
+    ---@type UnityEngine.MeshRenderer
+    meshSaveGod = nil,
+    ---@type UnityEngine.Transform
+    tf_saveGod = nil,
+    ---@type Thy.Mono.InputTargetMono
+    ipt_saveGod = nil
+}
+
+---@private
+function NpcView:ctor()
+    ---缓存的OrderInLayer
+    ---@type number
+    self.oldOrderInLayer = nil
+    ---缓存的npc朝向
+    ---@type number
+    self.oldNpcDir = nil
+    ---缓存的动画名
+    ---@type string
+    self.oldAnimationName = nil
+    ---npc数据
+    ---@type MainSceneNpcData
+    self.npcData = nil
+    ---是否需要淡入效果
+    ---@type boolean
+    self.needFadeIn = nil
+    ---npc类型
+    ---@type MainSceneNpcType
+    self.MainSceneNpcType = nil
+    ---是否是我的村落场景
+    ---@type boolean
+    self.isMyScene = nil
+    ---当前帧数
+    ---@type number
+    self.curTimeForLayer = 0
+    ---层级修改的帧数
+    ---@type number
+    self.intervalForLayer = 5
+    ---气泡引用
+    ---@type NpcPopupWorldSpaceView
+    self.popupView = nil
+    ----------------------------------------- 居民 -----------------------------------------
+    ---是否有后面的头发spine [4个spine]
+    ---@type boolean
+    self.hasBackHair = nil
+    ---身体形象id
+    ---@type number
+    self.bodyId = 1
+    ---脸部形象id
+    ---@type number
+    self.headId = 1
+    ---头发形象id
+    ---@type number
+    self.hairId = 1
+    ---后头发是否加载成功
+    ---@type boolean
+    self.isLoadHairBackSuc = nil
+    ---资源是否加载完成
+    ---@type boolean
+    self.isLoadFinish = nil
+    ---渐隐回调
+    ---@type fun()
+    self.fadeOutCallback = nil
+end
+
+---初始化角色形象
+---@param npcId number
+---@param curPos UnityEngine.Vector3 当前所处的世界坐标
+function NpcView:Init(npcId, curPos)
+    -- 初始化
+    self.isLoadFinish = false
+    self.args.NpcHelper:SetAlpha(self.args.spr_shadow, 0)
+    self.needFadeIn = ModelFactory.MainSceneNpc:NeedFadeInById(npcId)
+    self.MainSceneNpcType = ModelFactory.MainSceneNpc.NpcType
+    self.isMyScene = ModelFactory.VillageScene:IsMine()
+    self:AddListener()
+
+    -- 初始位置赋值
+    curPos.z = 0
+    self.args.NpcHelper:SetLocalPosition(curPos)
+    ---@type MainSceneNpcData
+    self.npcData = ModelFactory.MainSceneNpc:GetNpcTypeData(npcId)
+
+    -- 等资源全部加载完成才能设置动画
+    local loadFinCallback = function()
+        self.isLoadFinish = true
+    end
+
+    -- 居民spine加载
+    if self.npcData.type == self.MainSceneNpcType.Villager then
+        self:LoadVillagerSpine(loadFinCallback)
+        return
+    end
+
+    -- 隐士spine加载
+    if self.npcData.type == self.MainSceneNpcType.Hero then
+        self:LoadHeroSpine(loadFinCallback)
+        return
+    end
+
+    -- 政策npc spine加载
+    if self.npcData.type == self.MainSceneNpcType.PolicyNpc then
+        self:LoadPolicyNpcSpine(loadFinCallback)
+        return
+    end
+
+    -- 菜狗鸡精 或者 醉酒大仙 不需要加载
+    if self.npcData.type == self.MainSceneNpcType.DogFoodNpc or self.npcData.type == self.MainSceneNpcType.SaveGodNpc then
+        loadFinCallback()
+        self:DoFadeIn()
+        return
+    end
+end
+
+---修改动作
+---@param animationName string
+function NpcView:ChangeAnimation(animationName)
+    if self.isLoadFinish == false then
+        return
+    end
+
+    -- 相同状态下不切换
+    if self.oldAnimationName == animationName then
+        return
+    end
+
+    self.oldAnimationName = animationName
+
+    -- 修改隐士动画
+    if self.npcData.type == self.MainSceneNpcType.Hero then
+        self.args.NpcHelper:SetAnimation(self.args.spineHero, animationName)
+        return
+    end
+
+    -- 修改政策动画
+    if self.npcData.type == self.MainSceneNpcType.PolicyNpc then
+        self.args.NpcHelper:SetAnimation(self.args.spinePolicyNpc, animationName)
+        return
+    end
+
+    -- 修改菜狗鸡精动画
+    if self.npcData.type == self.MainSceneNpcType.DogFoodNpc then
+        self.args.NpcHelper:SetAnimation(self.args.spineDogFood, animationName)
+        return
+    end
+
+    -- 修改醉酒大仙动画
+    if self.npcData.type == self.MainSceneNpcType.SaveGodNpc then
+        self.args.NpcHelper:SetAnimation(self.args.spineSaveGod, animationName)
+        return
+    end
+
+    -- 修改居民动画
+    if self.npcData.type == self.MainSceneNpcType.Villager then
+        self.args.NpcHelper:SetAnimation(self.args.spineBody, animationName)
+        self.args.NpcHelper:SetAnimation(self.args.spineHead, animationName)
+        self.args.NpcHelper:SetAnimation(self.args.spineHair, animationName)
+        if self.hasBackHair == true and self.isLoadHairBackSuc then
+            self.args.NpcHelper:SetAnimation(self.args.spineHairBack, animationName)
+        end
+        return
+    end
+end
+
+---移动
+---@param curPos UnityEngine.Vector3 坐标
+---@param npcDir number npc朝向
+function NpcView:Move(curPos, npcDir)
+    curPos.z = 0
+    self.args.NpcHelper:SetLocalPosition(curPos)
+    -- npc朝向 改变 scale x 值
+    if self.oldNpcDir ~= npcDir then
+        self.oldNpcDir = npcDir
+        self.args.NpcHelper:SetDir(self.args.tr_Root, npcDir)
+    end
+end
+
+---根据坐标设置层级
+---@param curPos UnityEngine.Vector3 坐标
+function NpcView:SetOrderInLayer(curPos)
+    -- 限制频率
+    if self.curTimeForLayer > 0 and self.curTimeForLayer < self.intervalForLayer then
+        self.curTimeForLayer = self.curTimeForLayer + 1
+        return
+    end
+
+    self.curTimeForLayer = 1
+
+    local orderInLayer = ModelFactory.VillageScene:GetLayerByPos(curPos.x, curPos.y, false)
+    if self.oldOrderInLayer == orderInLayer then
+        return
+    end
+
+    self.oldOrderInLayer = orderInLayer
+
+    -- 隐士spine
+    if self.npcData.type == self.MainSceneNpcType.Hero then
+        self.args.NpcHelper:SetLayer(self.args.meshHero, orderInLayer)
+        return
+    end
+
+    -- 政策spine
+    if self.npcData.type == self.MainSceneNpcType.PolicyNpc then
+        self.args.NpcHelper:SetLayer(self.args.meshPolicyNpc, orderInLayer)
+        return
+    end
+
+    -- 菜狗鸡精spine
+    if self.npcData.type == self.MainSceneNpcType.DogFoodNpc then
+        self.args.NpcHelper:SetLayer(self.args.meshDogFood, orderInLayer)
+        return
+    end
+
+    -- 醉酒大仙spine
+    if self.npcData.type == self.MainSceneNpcType.SaveGodNpc then
+        self.args.NpcHelper:SetLayer(self.args.meshSaveGod, orderInLayer)
+        return
+    end
+
+    -- 居民spine
+    if self.npcData.type == self.MainSceneNpcType.Villager then
+        self.args.NpcHelper:SetLayer(self.args.meshBody, orderInLayer)
+        self.args.NpcHelper:SetLayer(self.args.meshHead, orderInLayer)
+        self.args.NpcHelper:SetLayer(self.args.meshHair, orderInLayer)
+        if self.hasBackHair == true then
+            self.args.NpcHelper:SetLayer(self.args.meshHairBack, orderInLayer)
+        end
+        return
+    end
+end
+
+---刷新气泡状态
+---@param isShow boolean 是否显示气泡
+function NpcView:UpdatePopup(isShow)
+    if isShow then
+        if self.popupView then
+            return
+        end
+
+        self:CreatePopup()
+        return
+    end
+
+    self:DestroyPopup()
+end
+
+---释放气泡
+function NpcView:DestroyPopup()
+    if not self.popupView then
+        return
+    end
+
+    MainSceneMgr:RecycleNpcPopupInst(self.popupView)
+    self.popupView = nil
+end
+
+---消失
+---@param callback fun() 完成回调
+function NpcView:DoGone(callback)
+    self:DoFadeOut(callback)
+end
+
+---释放
+function NpcView:Disposed()
+    if util_isNull(self.args.NpcHelper) == false then
+        self.args.NpcHelper:CloseFadeInSingleTask()
+        self.args.NpcHelper:CloseFadeInMultTask()
+        self.args.NpcHelper:CloseFadeOutSingleTask()
+        self.args.NpcHelper:CloseFadeOutMultTask()
+    end
+
+    if self.fadeOutCallback then
+        self.fadeOutCallback()
+        self.fadeOutCallback = nil
+    end
+
+    self:DestroyPopup()
+    self:RemoveListener()
+    self.needFadeIn = false
+    self.oldOrderInLayer = 0
+    self.oldNpcDir = 0
+    self.curTimeForLayer = 0
+    self.oldAnimationName = ""
+    self.npcData = nil
+    self.MainSceneNpcType = nil
+    self.popupView = nil
+end
+
+----------------------------------------- 政策npc -----------------------------------------
+
+---加载政策npc spine
+---@param loadFinCallback fun()
+---@private
+function NpcView:LoadPolicyNpcSpine(loadFinCallback)
+    self.args.NpcHelper:SetAlpha(self.args.spinePolicyNpc, 0)
+    local policyConfig = ConfigMap.policy[self.npcData.policyId]
+    local assetName = policyConfig and policyConfig.mapSpine or "1"
+    MainSceneHelper:LoadPolicySpine(assetName, function(asset)
+        if not self.args or util_isNull(self.args.spinePolicyNpc) == true then
+            return
+        end
+
+        loadFinCallback()
+        self:DoFadeIn()
+        if not asset then
+            return
+        end
+
+        self.args.spinePolicyNpc.skeletonDataAsset = asset
+        SpineUtil_ClearAnimation(self.args.spinePolicyNpc)
+        self.args.spinePolicyNpc:Initialize(true)
+    end)
+end
+
+----------------------------------------- 隐士 -----------------------------------------
+
+---加载隐士spine
+---@param loadFinCallback fun()
+---@private
+function NpcView:LoadHeroSpine(loadFinCallback)
+    self.args.NpcHelper:SetAlpha(self.args.spineHero, 0)
+    MainSceneHelper:LoadHeroSpine(self.npcData.id, function(asset)
+        if not self.args or util_isNull(self.args.spineHero) == true then
+            return
+        end
+        if loadFinCallback then
+            loadFinCallback()
+        end
+
+        self:DoFadeIn()
+        if not asset then
+            return
+        end
+
+        self.args.spineHero.skeletonDataAsset = asset
+        SpineUtil_ClearAnimation(self.args.spineHero)
+        self.args.spineHero:Initialize(true)
+    end)
+end
+
+----------------------------------------- 居民 -----------------------------------------
+
+---加载居民spine
+---@param loadFinCallback fun()
+---@private
+function NpcView:LoadVillagerSpine(loadFinCallback)
+    self.bodyId = 1
+    self.headId = 1
+    self.hairId = 1
+
+    self.villagerModel = ModelFactory.Villager:GetModel(self.npcData.id)
+    -- 有形象
+    if self.villagerModel then
+        self.bodyId = self.villagerModel.data.shapeBodyId
+        self.headId = self.villagerModel.data.shapeFaceId
+        self.hairId = self.villagerModel.data.shapeHeaderId
+    end
+
+    local hairConfig = ModelFactory.MainSceneNpc:GetVillagerShapeConfig(self.hairId)
+    self.hasBackHair = false
+    if hairConfig then
+        self.hasBackHair = hairConfig.hair == 1
+    end
+
+    self.isLoadHairBackSuc = false
+    GameObjectUtil_Active(self.args.spineHairBack, false)
+
+    -- 资源全都加载完成时的回调
+    local loadCnt = 0
+    local totalLoadCnt = self.hasBackHair == true and 4 or 3
+    local loadFin = function()
+        loadCnt = loadCnt + 1
+        if loadCnt < totalLoadCnt then
+            return
+        end
+
+        loadFinCallback()
+        self:DoFadeIn()
+    end
+
+    -- 资源加载
+    self:LoadBody(loadFin)
+    self:LoadHead(loadFin)
+    self:LoadHair(hairConfig, loadFin)
+    if self.hasBackHair == true then
+        self:LoadHairBack(hairConfig, loadFin)
+    end
+end
+
+---加载身体
+---@param loadFin fun()
+---@private
+function NpcView:LoadBody(loadFin)
+    self.args.NpcHelper:SetAlpha(self.args.spineBody, 0)
+    local config = ModelFactory.MainSceneNpc:GetVillagerShapeConfig(self.bodyId)
+    local resType = ResLoadHelper.ResType.MaleVillagerAdultNpc
+    local bodyAssetName = "1"
+    if config then
+        resType = (config.sex == Sex.Male) and
+            ResLoadHelper.ResType.MaleVillagerAdultNpc
+            or
+            ResLoadHelper.ResType.FemaleVillagerAdultNpc
+        bodyAssetName = config.spine
+    end
+
+    local fullPath = table_concat({ resType.BasePath, "body/", bodyAssetName, resType.Exs })
+    MainSceneHelper:LoadVillagerSpine(fullPath, function(res)
+        if not self.args or util_isNull(self.args.spineBody) == true or util_isNull(self.args.headFollower) == true or
+            util_isNull(self.args.hairFollower) == true or util_isNull(self.args.hairBackFollower) == true then
+            return
+        end
+
+        loadFin()
+        if not res then
+            return
+        end
+
+        self.args.spineBody.skeletonDataAsset = res
+        SpineUtil_ClearAnimation(self.args.spineBody)
+        self.args.spineBody:Initialize(true)
+        -- 重置跟随节点
+        self.args.headFollower:Initialize()
+        self.args.hairFollower:Initialize()
+        if self.hasBackHair == true then
+            self.args.hairBackFollower:Initialize()
+        end
+    end)
+end
+
+---加载头
+---@param loadFin fun()
+---@private
+function NpcView:LoadHead(loadFin)
+    self.args.NpcHelper:SetAlpha(self.args.spineHead, 0)
+    local config = ModelFactory.MainSceneNpc:GetVillagerShapeConfig(self.headId)
+    local resType = ResLoadHelper.ResType.MaleVillagerAdultNpc
+    local headAssetName = "1"
+    if config then
+        resType = (config.sex == Sex.Male) and
+            ResLoadHelper.ResType.MaleVillagerAdultNpc
+            or
+            ResLoadHelper.ResType.FemaleVillagerAdultNpc
+        headAssetName = config.spine
+    elseif self.villagerModel then
+        resType = (self.villagerModel.data.sex == Sex.Male) and
+            ResLoadHelper.ResType.MaleVillagerAdultNpc
+            or
+            ResLoadHelper.ResType.FemaleVillagerAdultNpc
+    end
+
+    local fullPath = table_concat({ resType.BasePath, "head/", headAssetName, resType.Exs })
+    MainSceneHelper:LoadVillagerSpine(fullPath, function(res)
+        if not self.args or util_isNull(self.args.spineHead) == true then
+            return
+        end
+
+        loadFin()
+        if not res then
+            return
+        end
+
+        self.args.spineHead.skeletonDataAsset = res
+        SpineUtil_ClearAnimation(self.args.spineHead)
+        self.args.spineHead:Initialize(true)
+    end)
+end
+
+---加载头发
+---@param config IConfVillagerShape
+---@param loadFin fun()
+---@private
+function NpcView:LoadHair(config, loadFin)
+    self.args.NpcHelper:SetAlpha(self.args.spineHair, 0)
+    local resType = ResLoadHelper.ResType.MaleVillagerAdultNpc
+    local hairAssetName = "1"
+    if config then
+        resType = (config.sex == Sex.Male) and
+            ResLoadHelper.ResType.MaleVillagerAdultNpc
+            or
+            ResLoadHelper.ResType.FemaleVillagerAdultNpc
+        hairAssetName = config.spine
+    elseif self.villagerModel then
+        resType = (self.villagerModel.data.sex == Sex.Male) and
+            ResLoadHelper.ResType.MaleVillagerAdultNpc
+            or
+            ResLoadHelper.ResType.FemaleVillagerAdultNpc
+    end
+
+    local fullPath = table_concat({ resType.BasePath, "hair/", hairAssetName, resType.Exs })
+    MainSceneHelper:LoadVillagerSpine(fullPath, function(res)
+        if not self.args or util_isNull(self.args.spineHair) == true then
+            return
+        end
+
+        loadFin()
+        if not res then
+            return
+        end
+
+        self.args.spineHair.skeletonDataAsset = res
+        SpineUtil_ClearAnimation(self.args.spineHair)
+        self.args.spineHair:Initialize(true)
+    end)
+end
+
+---加载后面的头发
+---@param config IConfVillagerShape
+---@param loadFin fun()
+---@private
+function NpcView:LoadHairBack(config, loadFin)
+    self.args.NpcHelper:SetAlpha(self.args.spineHairBack, 0)
+    local resType = ResLoadHelper.ResType.MaleVillagerAdultNpc
+    local hairAssetName = "1"
+    if config then
+        resType = (config.sex == Sex.Male) and
+            ResLoadHelper.ResType.MaleVillagerAdultNpc
+            or
+            ResLoadHelper.ResType.FemaleVillagerAdultNpc
+        hairAssetName = config.spine
+    elseif self.villagerModel then
+        resType = (self.villagerModel.data.sex == Sex.Male) and
+            ResLoadHelper.ResType.MaleVillagerAdultNpc
+            or
+            ResLoadHelper.ResType.FemaleVillagerAdultNpc
+    end
+
+    local fullPath = table_concat({ resType.BasePath, "hair/", hairAssetName, "_1", resType.Exs })
+    MainSceneHelper:LoadVillagerSpine(fullPath, function(res)
+        if not self.args or util_isNull(self.args.spineHairBack) == true then
+            return
+        end
+
+        loadFin()
+        if not res then
+            return
+        end
+
+        self.isLoadHairBackSuc = true
+        GameObjectUtil_Active(self.args.spineHairBack, true)
+        self.args.spineHairBack.skeletonDataAsset = res
+        SpineUtil_ClearAnimation(self.args.spineHairBack)
+        self.args.spineHairBack:Initialize(true)
+    end)
+end
+
+---淡入效果
+---@private
+function NpcView:DoFadeIn()
+    if not self.npcData or not self.args or util_isNull(self.args.NpcHelper) then
+        return
+    end
+
+    self.args.NpcHelper:CloseFadeInSingleTask()
+    self.args.NpcHelper:CloseFadeInMultTask()
+
+    -- 不需要淡入效果，直接显示
+    if not self.needFadeIn then
+        self.args.NpcHelper:SetAlpha(self.args.spr_shadow, 1)
+
+        -- 隐士
+        if self.npcData.type == self.MainSceneNpcType.Hero then
+            self.args.NpcHelper:SetAlpha(self.args.spineHero, 1)
+            return
+        end
+
+        -- 政策
+        if self.npcData.type == self.MainSceneNpcType.PolicyNpc then
+            self.args.NpcHelper:SetAlpha(self.args.spinePolicyNpc, 1)
+            return
+        end
+
+        -- 菜狗鸡精
+        if self.npcData.type == self.MainSceneNpcType.DogFoodNpc then
+            self.args.NpcHelper:SetAlpha(self.args.spineDogFood, 1)
+            return
+        end
+
+        -- 醉酒大仙
+        if self.npcData.type == self.MainSceneNpcType.SaveGodNpc then
+            self.args.NpcHelper:SetAlpha(self.args.spineSaveGod, 1)
+            return
+        end
+
+        -- 居民
+        if self.npcData.type == self.MainSceneNpcType.Villager then
+            self.args.NpcHelper:SetAlpha(self.args.spineBody, 1)
+            self.args.NpcHelper:SetAlpha(self.args.spineHead, 1)
+            self.args.NpcHelper:SetAlpha(self.args.spineHair, 1)
+            if self.hasBackHair then
+                self.args.NpcHelper:SetAlpha(self.args.spineHairBack, 1)
+            end
+            return
+        end
+        return
+    end
+
+    -- 隐士
+    if self.npcData.type == self.MainSceneNpcType.Hero then
+        self.args.NpcHelper:DoFadeIn(self.args.spr_shadow, self.args.spineHero, self.args.fadeInDuration)
+        return
+    end
+
+    -- 政策小人
+    if self.npcData.type == self.MainSceneNpcType.PolicyNpc then
+        self.args.NpcHelper:DoFadeIn(self.args.spr_shadow, self.args.spinePolicyNpc, self.args.fadeInDuration)
+        return
+    end
+
+    -- 菜狗鸡精
+    if self.npcData.type == self.MainSceneNpcType.DogFoodNpc then
+        self.args.NpcHelper:DoFadeIn(self.args.spr_shadow, self.args.spineDogFood, self.args.fadeInDuration)
+        return
+    end
+
+    -- 醉酒大仙
+    if self.npcData.type == self.MainSceneNpcType.SaveGodNpc then
+        self.args.NpcHelper:DoFadeIn(self.args.spr_shadow, self.args.spineSaveGod, self.args.fadeInDuration)
+        return
+    end
+
+    -- 居民
+    if self.npcData.type == self.MainSceneNpcType.Villager then
+        local spineHairBack = nil
+        if self.hasBackHair then
+            spineHairBack = self.args.spineHairBack
+        end
+        self.args.NpcHelper:DoFadeInMult(self.args.spr_shadow, self.args.spineBody, self.args.spineHead,
+            self.args.spineHair, spineHairBack, self.args.fadeInDuration)
+        return
+    end
+end
+
+---淡出效果
+---@param callback fun() 完成回调
+---@private
+function NpcView:DoFadeOut(callback)
+    self.fadeOutCallback = callback
+
+    local finCallback = function()
+        self.fadeOutCallback = nil
+        if callback then
+            callback()
+            callback = nil
+        end
+    end
+
+    -- 隐士
+    if self.npcData.type == self.MainSceneNpcType.Hero then
+        self.args.NpcHelper:DoFadeOut(self.args.spr_shadow, self.args.spineHero, self.args.fadeOutDuration, finCallback)
+        return
+    end
+
+    -- 政策小人
+    if self.npcData.type == self.MainSceneNpcType.PolicyNpc then
+        self.args.NpcHelper:DoFadeOut(self.args.spr_shadow, self.args.spinePolicyNpc, self.args.fadeOutDuration,
+            finCallback)
+        return
+    end
+
+    -- 菜狗鸡精
+    if self.npcData.type == self.MainSceneNpcType.DogFoodNpc then
+        self.args.NpcHelper:DoFadeOut(self.args.spr_shadow, self.args.spineDogFood, self.args.fadeOutDuration,
+            finCallback)
+        return
+    end
+
+    -- 醉酒大仙
+    if self.npcData.type == self.MainSceneNpcType.SaveGodNpc then
+        self.args.NpcHelper:DoFadeOut(self.args.spr_shadow, self.args.spineSaveGod, self.args.fadeOutDuration,
+            finCallback)
+        return
+    end
+
+    -- 居民
+    if self.npcData.type == self.MainSceneNpcType.Villager then
+        local spineHairBack = nil
+        if self.hasBackHair then
+            spineHairBack = self.args.spineHairBack
+        end
+        self.args.NpcHelper:DoFadeOutMult(self.args.spr_shadow, self.args.spineBody, self.args.spineHead,
+            self.args.spineHair, spineHairBack, self.args.fadeOutDuration, finCallback)
+        return
+    end
+end
+
+---创建npc气泡
+---@private
+function NpcView:CreatePopup()
+    self.popupView = MainSceneMgr:GetNpcPopupInst()
+    if not self.popupView then
+        return
+    end
+
+    local tf = self.popupView.transform
+    tf:SetParent(self.transform)
+    tf:SetLocalPosition(0, 0, 0)
+    self.popupView:DoTalk(self.npcData.id)
+
+    local layer = MapSceneObjLoader:GetSortingLayerName(MapSceneObjLoader.MainSceneObjLayer.Popup)
+    GameObjectUtil.ChangeSortingLayer(self.popupView.gameObject, layer, true)
+end
+
+---添加监听
+---@private
+function NpcView:AddListener()
+    if util_isNull(self.args.ipt_policy) == false then
+        self.policyClickEvent = xLuaUtil.bind(self.OnPolicyClick, self)
+        self.args.ipt_policy:OnPointerClickHandler('+', self.policyClickEvent)
+    end
+    if util_isNull(self.args.ipt_dogFood) == false then
+        self.args.ipt_dogFood:OnPointerClickHandler('+', self.OnDogFoodClick)
+    end
+    if util_isNull(self.args.ipt_saveGod) == false then
+        self.saveGodClickEvent = xLuaUtil.bind(self.OnSaveGodClick, self)
+        self.args.ipt_saveGod:OnPointerClickHandler('+', self.saveGodClickEvent)
+    end
+end
+
+---点击政策小人
+---@private
+function NpcView:OnPolicyClick()
+    -- 拜访界面不允许点击
+    if self.isMyScene == false then
+        return
+    end
+
+    -- 建筑布局状态时不响应点击
+    if Game.BuildingChangeLayout and Game.BuildingChangeLayout.actived == true then
+        return
+    end
+    if Game.OneFinger:IsInContext() then
+        Game.OneFinger:Destroy()
+    end
+
+    PolicyHelper.NetPolicyGetList(self.npcData.policyId)
+end
+
+---点击菜狗鸡精小人
+---@private
+function NpcView.OnDogFoodClick()
+    -- 建筑布局状态时不响应点击
+    if Game.BuildingChangeLayout and Game.BuildingChangeLayout.actived == true then
+        return
+    end
+
+    MainSceneHelper:OpenDogFoodView()
+end
+
+---点击醉酒大仙
+---@private
+function NpcView:OnSaveGodClick()
+    -- 拜访界面不允许点击
+    if self.isMyScene == false then
+        return
+    end
+
+    -- 建筑布局状态时不响应点击
+    if Game.BuildingChangeLayout and Game.BuildingChangeLayout.actived == true then
+        return
+    end
+
+    MainSceneHelper:OpenSaveGodView()
+end
+
+---移除监听
+---@private
+function NpcView:RemoveListener()
+    if util_isNull(self.args.ipt_policy) == false then
+        self.args.ipt_policy:OnPointerClickHandler('-', self.policyClickEvent)
+    end
+    if util_isNull(self.args.ipt_dogFood) == false then
+        self.args.ipt_dogFood:OnPointerClickHandler('-', self.OnDogFoodClick)
+    end
+    if util_isNull(self.args.ipt_saveGod) == false then
+        self.args.ipt_saveGod:OnPointerClickHandler('-', self.saveGodClickEvent)
+    end
+end
+
+return NpcView

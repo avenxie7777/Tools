@@ -1,0 +1,448 @@
+--useLuaClass useArgsMeta
+---@class MapGuideSceneUIView:View
+local MapGuideSceneUIView = Class()
+MapGuideSceneUIView.args = {
+    ---@type PY.PyButton
+    btn_Self = nil,
+    ---@type UnityEngine.RectTransform
+    rt_ImgRoot = nil,
+    ---@type PY.PyImage
+    img_Icon = nil,
+    ---@type DG.Tweening.DOTweenAnimation
+    Anim = nil,
+}
+
+---@type UnityEngine.Vector3
+local Vector3_up = Vector3.up
+---@type UnityEngine.Vector3
+local Vector3_down = Vector3.down
+---@type UnityEngine.Quaternion
+local Quaternion = UE.Quaternion.identity
+local GameObjectUtil_Active = GameObjectUtil.Active
+
+---@class MapGuideScreenLimitData
+---@field minPosX number
+---@field maxPosX number
+---@field minPosY number
+---@field maxPosY number
+
+---@class MapGuideUIOption
+---@field type number 类型：1菜狗鸡精，2醉酒大仙，3村长之家，4保卫处，5村落区域, 6政策解锁入口
+---@field subType number
+
+---@private
+function MapGuideSceneUIView:ctor()
+    ---@type boolean
+    self.insideInScreen = nil
+    ---@type number
+    self.posZ = nil
+    ---@type UnityEngine.Vector3
+    self.targetPos = nil
+    ---@type number
+    self.height = nil
+    ---@type UnityEngine.Vector3
+    self.pointA = nil
+    ---@type UnityEngine.Vector3
+    self.pointB = nil
+    ---@type UnityEngine.Vector3
+    self.pointC = nil
+    ---@type UnityEngine.Vector3
+    self.pointD = nil
+    ---@type MapGuideScreenLimitData
+    self.screenLimit = nil
+    ---@type UnityEngine.Vector3
+    self.cameraPos = nil
+    ---交点坐标
+    ---@type UnityEngine.Vector3
+    self.intersectionPos = nil
+    ---屏幕边框数据
+    ---@type UnityEngine.Vector3[]
+    self.cameraFrame = nil
+    ---当前交点方向
+    ---@type number
+    self.intersectionDir = nil
+    ---交点方向
+    self.IntersectionDirDefine = nil
+end
+
+---@private
+function MapGuideSceneUIView:Awake()
+    self.initScale = self.transform.localScale.x
+    self.posZ = self.transform.position.z
+end
+
+---初始化
+---@param uiOption MapGuideUIOption
+function MapGuideSceneUIView:Init(uiOption)
+    self.option = uiOption
+    self:InitData()
+    self:RefreshView()
+end
+
+---释放
+function MapGuideSceneUIView:Shut()
+    self.option = nil
+    self.pointA = nil
+    self.pointB = nil
+    self.pointC = nil
+    self.pointD = nil
+    self.cameraPos = nil
+    self.targetPos = nil
+    self.screenLimit = nil
+    self.cameraFrame = nil
+    self.intersectionPos = nil
+    self.args.img_Icon.sprite = nil
+end
+
+---更新旋转、位置
+---@param worldPos UnityEngine.Vector3 目标世界坐标
+---@param needShowOutScreen boolean 超出屏幕外是否显示
+---@param height number 物体高度
+function MapGuideSceneUIView:UpdateTransform(worldPos, needShowOutScreen, height)
+    if not worldPos then
+        GameObjectUtil_Active(self.gameObject, false)
+        return
+    end
+
+    -- 获取相机坐标
+    local cameraPosX, cameraPosY = MainSceneHelper:GetCameraPos()
+    if cameraPosX == nil or cameraPosY == nil then
+        return
+    end
+
+    -- 获取相机显示范围
+    local cameraShowView = MainSceneHelper:GetCameraShownView()
+    if not cameraShowView then
+        return
+    end
+
+    self.screenLimit.minPosX = cameraShowView[1]
+    self.screenLimit.maxPosX = cameraShowView[2]
+    self.screenLimit.minPosY = cameraShowView[3]
+    self.screenLimit.maxPosY = cameraShowView[4]
+    cameraShowView = nil
+
+    -- 考虑物体大小
+    self.insideInScreen = self.screenLimit.minPosX <= worldPos.x and worldPos.x <= self.screenLimit.maxPosX
+        and self.screenLimit.minPosY - height <= worldPos.y and worldPos.y + height <= self.screenLimit.maxPosY
+
+    -- 在屏幕范围内，直接显示在目标位置
+    if self.insideInScreen then
+        GameObjectUtil_Active(self.gameObject, true)
+        self.transform:SetPosition(worldPos.x, worldPos.y + height, self.posZ)
+        self:LookAt(self.transform, Vector3_down, Vector3_down)
+        self:LookAt(self.args.rt_ImgRoot, Vector3_up, Vector3_up)
+        self:UpdateScale()
+        return
+    end
+
+    -- 在屏幕外且出屏幕后不需要显示的
+    if not needShowOutScreen then
+        GameObjectUtil_Active(self.gameObject, false)
+        return
+    end
+
+    self.height = height
+    self.targetPos.x = worldPos.x
+    self.targetPos.y = worldPos.y + height
+
+    -- 计算出交点坐标
+    self.cameraPos.x = cameraPosX
+    self.cameraPos.y = cameraPosY
+    self.targetPos.z = 0
+    ---@type UnityEngine.Vector3
+    local pos = nil
+    self:GetCameraFrame(self.screenLimit)
+    for index, value in pairs(self.cameraFrame) do
+        local next = index + 1
+        if next > #self.cameraFrame then
+            next = 1
+        end
+        pos = self:SegmentsInterPoint(self.cameraPos, self.targetPos, value, self.cameraFrame[next])
+        if pos then
+            self.intersectionDir = index
+            break
+        end
+    end
+
+    if not pos then
+        GameObjectUtil_Active(self.gameObject, false)
+        return
+    end
+
+    self:UpdateScale()
+
+    local offsetX, offsetY = self:GetOffset()
+    self.transform:SetPosition(pos.x + offsetX, pos.y + offsetY, self.posZ)
+    GameObjectUtil_Active(self.gameObject, true)
+
+    -- 计算旋转方向
+    ---@type UnityEngine.Vector3
+    local dir = self.targetPos - pos
+    self:LookAt(self.transform, dir, Vector3_down)
+    self:LookAt(self.args.rt_ImgRoot, Vector3_up, Vector3_up)
+
+    dir = nil
+    pos = nil
+end
+
+---更新缩放
+---@param scale number 缩放比例
+---@private
+function MapGuideSceneUIView:UpdateScale()
+    self.curScale = MainSceneHelper:GetOrthographicSizeScale()
+    self.curScale = self.initScale * self.curScale
+    if self.lastScale ~= nil and self.lastScale == self.curScale then
+        return
+    end
+
+    self.lastScale = self.curScale
+    self.transform:SetLocalScale(self.curScale, self.curScale, self.curScale)
+end
+
+---获取xy偏移值
+---@return number, number
+function MapGuideSceneUIView:GetOffset()
+    local offsetX = 0
+    local offsetY = 0
+    local isMyScene = ModelFactory.VillageScene:IsMine()
+
+    -- 交点在上方
+    if self.intersectionDir == self.IntersectionDirDefine.Top then
+        -- 防止被顶部ui盖住，加了个y的偏移
+        local delta = isMyScene and 1.8 or 1.2
+        offsetY = offsetY - delta * self.curScale
+        return offsetX, offsetY
+    end
+
+    -- 交点在下方
+    if self.intersectionDir == self.IntersectionDirDefine.Bottom then
+        -- 防止被底部ui盖住，加了个y的偏移
+        local delta = isMyScene and 2.8 or 1.72
+        offsetY = offsetY + delta * self.curScale
+        return offsetX, offsetY
+    end
+
+    -- 交点在左边
+    if self.intersectionDir == self.IntersectionDirDefine.Left then
+        local delta = 0.1 * self.curScale
+        offsetX = offsetX + delta
+        return offsetX, offsetY
+    end
+
+    -- 交点在右边
+    if self.intersectionDir == self.IntersectionDirDefine.Right then
+        -- 防止被右边ui盖住，加了个x的偏移
+        local delta = isMyScene and 1.5 or 0
+        offsetX = offsetX - delta * self.curScale
+        return offsetX, offsetY
+    end
+
+    return offsetX, offsetY
+end
+
+---计算两个线段的交点
+---@param a UnityEngine.Vector3
+---@param b UnityEngine.Vector3
+---@param c UnityEngine.Vector3
+---@param d UnityEngine.Vector3
+---@return UnityEngine.Vector3
+---@private
+function MapGuideSceneUIView:SegmentsInterPoint(a, b, c, d)
+    self.pointA.x = a.x
+    self.pointA.y = a.y
+    self.pointA.z = a.z
+
+    self.pointB.x = b.x
+    self.pointB.y = b.y
+    self.pointB.z = b.z
+
+    self.pointC.x = c.x
+    self.pointC.y = c.y
+    self.pointC.z = c.z
+
+    self.pointD.x = d.x
+    self.pointD.y = d.y
+    self.pointD.z = d.z
+
+    --v1×v2=x1y2-y1x2
+    --以线段ab为准，是否c，d在同一侧
+    local ab = self.pointB - self.pointA
+    local ac = self.pointC - self.pointA
+    local abXac = self:Cross(ab, ac)
+
+    local ad = self.pointD - self.pointA
+    local abXad = self:Cross(ab, ad)
+
+    if abXac * abXad >= 0 then
+        return nil
+    end
+
+    --以线段cd为准，是否ab在同一侧
+    local cd = self.pointD - self.pointC
+    local ca = self.pointA - self.pointC
+    local cb = self.pointB - self.pointC
+    local ab = self.pointB - self.pointA
+
+    local cdXca = self:Cross(cd, ca)
+    local cdXcb = self:Cross(cd, cb)
+    if cdXca * cdXcb >= 0 then
+        return nil
+    end
+
+    --计算交点坐标
+    local t = self:Cross(ca, cd) / self:Cross(cd, ab)
+    local dx = t * (b.x - a.x)
+    local dy = t * (b.y - a.y)
+
+    self.intersectionPos.x = a.x + dx
+    self.intersectionPos.y = a.y + dy
+    self.intersectionPos.z = 0
+    return self.intersectionPos
+end
+
+---@param a UnityEngine.Vector3
+---@param b UnityEngine.Vector3
+---@return number
+---@private
+function MapGuideSceneUIView:Cross(a, b)
+    return a.x * b.y - b.x * a.y
+end
+
+---朝向
+---@param transform UnityEngine.Transform
+---@param dic UnityEngine.Vector3
+---@param lookAxis UnityEngine.Vector3
+---@private
+function MapGuideSceneUIView:LookAt(transform, dir, lookAxis)
+    Quaternion:SetFromToRotation(lookAxis, dir)
+    transform.rotation = Quaternion
+end
+
+---获取摄像机边框
+---@param screenLimit MapGuideScreenLimitData
+---@private
+function MapGuideSceneUIView:GetCameraFrame(screenLimit)
+    -- 左下
+    self.cameraFrame[1].x = screenLimit.minPosX
+    self.cameraFrame[1].y = screenLimit.minPosY
+    -- 左上
+    self.cameraFrame[2].x = screenLimit.minPosX
+    self.cameraFrame[2].y = screenLimit.maxPosY
+    -- 右上
+    self.cameraFrame[3].x = screenLimit.maxPosX
+    self.cameraFrame[3].y = screenLimit.maxPosY
+    -- 右下
+    self.cameraFrame[4].x = screenLimit.maxPosX
+    self.cameraFrame[4].y = screenLimit.minPosY
+end
+
+---初始化数据
+---@private
+function MapGuideSceneUIView:InitData()
+    self.pointA = Vector3()
+    self.pointB = Vector3()
+    self.pointC = Vector3()
+    self.pointD = Vector3()
+    self.targetPos = Vector3()
+    self.intersectionPos = Vector3()
+
+    self.screenLimit = {}
+    self.cameraFrame = {
+        [1] = { z = 0 },
+        [2] = { z = 0 },
+        [3] = { z = 0 },
+        [4] = { z = 0 }
+    }
+    self.cameraPos = { z = 0 }
+    self.IntersectionDirDefine = {
+        Left = 1,
+        Top = 2,
+        Right = 3,
+        Bottom = 4
+    }
+end
+
+---刷新视图
+---@private
+function MapGuideSceneUIView:RefreshView()
+    local assetName = ""
+    if self.option.type == 1 then
+        assetName = "DogFood"
+    elseif self.option.type == 2 then
+        assetName = "SaveGod"
+    elseif self.option.type == 3 then
+        assetName = "PlayerHome"
+    elseif self.option.type == 4 then
+        assetName = "Patrol"
+    elseif self.option.type == 5 then
+        assetName = "VillageAreaEntrance"
+    elseif self.option.type == 6 then
+        local policyCfg = ConfigMap.policy[self.option.subType]
+        assetName = "policy_" .. policyCfg.icon
+    end
+
+    self.args.img_Icon.enabled = false
+    ResLoadHelper:SetImage(ResLoadHelper.ResType.MapMainBatches, assetName, self.args.img_Icon, false)
+end
+
+---@private
+function MapGuideSceneUIView:Start()
+    self.args.btn_Self.onClick:AddListener(function()
+        -- 不在屏幕内就移动
+        if not self.insideInScreen then
+            local height = self.height or 0
+            ---@type UnityEngine.Vector3
+            local jumpPos = { x = self.targetPos.x, y = self.targetPos.y - height / 2 }
+            -- 我的村落场景
+            if ModelFactory.VillageScene:IsMine() == true then
+                MainSceneMgr:DoCameraMove(jumpPos)
+                return
+            end
+
+            -- 拜访场景
+            VisitSceneMgr:DoCameraMove(jumpPos)
+            return
+        end
+
+        -- 菜狗鸡精
+        if self.option.type == 1 then
+            MainSceneHelper:OpenDogFoodView()
+            return
+        end
+
+        -- 醉酒大仙
+        if self.option.type == 2 then
+            MainSceneHelper:OpenSaveGodView()
+            return
+        end
+
+        -- 村长之家
+        if self.option.type == 3 then
+            local data = ModelFactory.Building:GetPlayerHome().data
+            BuildingInnerViewDirector.BuildingClick(data)
+            return
+        end
+
+        -- 保卫处
+        if self.option.type == 4 then
+            local data = ModelFactory.Building:GetSecurityOffice().data
+            BuildingInnerViewDirector.BuildingClick(data)
+            return
+        end
+
+        -- 区域解锁入口
+        if self.option.type == 5 then
+            MainSceneHelper:OpenReclamationEnterView(self.option.subType)
+            return
+        end
+
+        -- 政策
+        if self.option.type == 6 then
+            PolicyHelper.NetPolicyGetList(self.option.subType)
+            return
+        end
+    end)
+end
+
+return MapGuideSceneUIView
