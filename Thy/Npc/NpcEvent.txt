@@ -1,6 +1,0 @@
----@class NpcEvent
-local NpcEvent = {
-    ---消失
-    Gone = 1
-}
-return NpcEvent

@@ -1,0 +1,6 @@
+1. snipaste					截屏工具
+2. Simple Sticky Notes  	备忘录
+3. Q-Dir 					多文件夹管理
+4. Beyond Compare 4			文件对比工具
+5. Notepad++				文本编辑工具
+6. ToDesk					远程软件（建议直接ip连接）
